@@ -11,6 +11,11 @@
 # Test binary, built with `go test -c`
 *.test
 
+# SQLite
+*.db
+*.sqllite
+*.sqllite3
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*
