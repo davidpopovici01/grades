@@ -4,6 +4,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -31,6 +32,8 @@ to quickly create a Cobra application.`,
 		fmt.Println("Context:")
 		fmt.Printf("  Class: %s\n", fallback(class))
 		fmt.Printf("  Open assignment: %s\n", fallback(open))
+		viper.Set("current_class_id", "APCSA2")
+		viper.WriteConfig()
 	},
 }
 
@@ -74,6 +77,17 @@ func initConfig() {
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+	} else {
+		// No config file found: create one
+		home, err := os.UserHomeDir()
+		cobra.CheckErr(err)
+
+		cfgPath := filepath.Join(home, ".grades.yaml")
+		if err := viper.WriteConfigAs(cfgPath); err != nil {
+			cobra.CheckErr(err)
+		}
+
+		fmt.Fprintln(os.Stderr, "Creating new config file:", cfgPath)
 	}
 }
 
