@@ -1,7 +1,4 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-
-*/
+// Package cmd holds the functionality for the raw grades command
 package cmd
 
 import (
@@ -26,7 +23,15 @@ This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
+	Run: func(cmd *cobra.Command, args []string) {
+		class := viper.GetString("current_class_id")
+		open := viper.GetString("open_assignment_id")
+
+		fmt.Println("Grades CLI")
+		fmt.Println("Context:")
+		fmt.Printf("  Class: %s\n", fallback(class))
+		fmt.Printf("  Open assignment: %s\n", fallback(open))
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -46,10 +51,6 @@ func init() {
 	// will be global for your application.
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.grades.yaml)")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -74,4 +75,11 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+func fallback(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
