@@ -2,15 +2,20 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	_ "modernc.org/sqlite"
 )
 
-var cfgFile string
+var (
+	db      *sql.DB
+	cfgFile string
+)
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -47,13 +52,34 @@ func Execute() {
 }
 
 func init() {
-	cobra.OnInitialize(initConfig)
+	cobra.OnInitialize(initConfig, initDB)
 
 	// Here you will define your flags and configuration settings.
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.grades.yaml)")
+}
+
+func initDB() {
+	home, err := os.UserHomeDir()
+	cobra.CheckErr(err)
+
+	configDir := filepath.Join(home, ".grades")
+	dbPath := filepath.Join(configDir, "grades.db")
+
+	// Open SQLite database (file is created if it doesn't exist)
+	conn, err := sql.Open("sqlite", dbPath)
+	cobra.CheckErr(err)
+
+	// Verify connection is usable now (not later)
+	if err := conn.Ping(); err != nil {
+		_ = conn.Close()
+		cobra.CheckErr(err)
+	}
+
+	db = conn
+	fmt.Fprintln(os.Stderr, "Using database:", dbPath)
 }
 
 // initConfig reads in config file and ENV variables if set.
