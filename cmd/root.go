@@ -58,36 +58,37 @@ func init() {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	if cfgFile != "" {
-		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
-	} else {
-		// Find home directory.
-		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
+	// Find home directory.
+	home, err := os.UserHomeDir()
+	cobra.CheckErr(err)
 
-		// Search config in home directory with name ".grades" (without extension).
-		viper.AddConfigPath(home)
-		viper.SetConfigType("yaml")
-		viper.SetConfigName(".grades")
+	// Define config directory
+	configDir := filepath.Join(home, ".grades")
+
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		cobra.CheckErr(err)
 	}
+
+	// Search config in home directory with name ".grades" (without extension).
+	viper.AddConfigPath(configDir)
+	viper.SetConfigType("yaml")
+	viper.SetConfigName("config")
 
 	viper.AutomaticEnv() // read in environment variables that match
 
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
-	} else {
-		// No config file found: create one
-		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
+	// 6. Try reading config
+	if err := viper.ReadInConfig(); err != nil {
+		// Config not found: create new one
+		configPath := filepath.Join(configDir, "config.yaml")
 
-		cfgPath := filepath.Join(home, ".grades.yaml")
-		if err := viper.WriteConfigAs(cfgPath); err != nil {
+		// Create empty config file
+		if err := viper.WriteConfigAs(configPath); err != nil {
 			cobra.CheckErr(err)
 		}
 
-		fmt.Fprintln(os.Stderr, "Creating new config file:", cfgPath)
+		fmt.Fprintln(os.Stderr, "Created new config file:", configPath)
+	} else {
+		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
 }
 
