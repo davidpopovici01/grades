@@ -7,13 +7,13 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/davidpopovici01/grades/internal/db"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	_ "modernc.org/sqlite"
 )
 
 var (
-	db      *sql.DB
+	conn    *sql.DB
 	cfgFile string
 )
 
@@ -68,17 +68,10 @@ func initDB() {
 	configDir := filepath.Join(home, ".grades")
 	dbPath := filepath.Join(configDir, "grades.db")
 
-	// Open SQLite database (file is created if it doesn't exist)
-	conn, err := sql.Open("sqlite", dbPath)
+	c, err := db.Open(dbPath)
 	cobra.CheckErr(err)
 
-	// Verify connection is usable now (not later)
-	if err := conn.Ping(); err != nil {
-		_ = conn.Close()
-		cobra.CheckErr(err)
-	}
-
-	db = conn
+	conn = c
 	fmt.Fprintln(os.Stderr, "Using database:", dbPath)
 }
 
