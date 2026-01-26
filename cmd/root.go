@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/davidpopovici01/grades/internal/db"
+	"github.com/davidpopovici01/grades/internal/migrate"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -73,6 +74,10 @@ func initDB() {
 
 	conn = c
 	fmt.Fprintln(os.Stderr, "Using database:", dbPath)
+
+	if err := migrate.Up(conn); err != nil {
+		cobra.CheckErr(err)
+	}
 }
 
 // initConfig reads in config file and ENV variables if set.
