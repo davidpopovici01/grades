@@ -100,6 +100,11 @@ func initConfig() {
 
 	viper.AutomaticEnv() // read in environment variables that match
 
+	viper.SetDefault("context.term_id", 0)
+	viper.SetDefault("context.course_year_id", 0)
+	viper.SetDefault("context.section_id", 0)
+	viper.SetDefault("context.open_assignment_id", 0)
+
 	// 6. Try reading config
 	if err := viper.ReadInConfig(); err != nil {
 		// Config not found: create new one
