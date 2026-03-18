@@ -1,0 +1,47 @@
+version: 2
+
+project_name: grades
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: grades
+    main: ./main.go
+    binary: grades
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    ids:
+      - grades
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  use: git
+
+release:
+  draft: false
+  prerelease: auto
