@@ -49,3 +49,4 @@ go.work.sum
 roster_setup.csv
 categories_setup.csv
 grades-test-size.exe
+dist/
