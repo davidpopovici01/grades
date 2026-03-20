@@ -396,6 +396,13 @@ type studentOverview struct {
 	Redo    []string
 }
 
+type redoAssignment struct {
+	ID       int
+	Title    string
+	Category string
+	Record   GradeRecord
+}
+
 func (a *App) studentStatusGroups(students []Student) (map[int][]string, error) {
 	ctx := a.context()
 	rows, err := a.db.Query(`
@@ -809,6 +816,54 @@ func (a *App) PassStudent(studentID string) error {
 	return a.applyGradeEntryToStudent(studentID, gradeEntry{Flags: flagPass}, "pass")
 }
 
+func (a *App) ListStudentRedo(studentID string) error {
+	student, assignments, scope, err := a.redoAssignmentsForStudent(studentID)
+	if err != nil {
+		return err
+	}
+	if scope != "" {
+		fmt.Fprintln(a.out, scope)
+	}
+	fmt.Fprintf(a.out, "Redo assignments for %s %s\n", student.FirstName, student.LastName)
+	for idx, assignment := range assignments {
+		fmt.Fprintf(a.out, "%d\t%s\t%s\t%s\n", idx+1, assignment.Title, assignment.Category, displayGradePlain(assignment.Record))
+	}
+	return nil
+}
+
+func (a *App) PassStudentRedo(studentID string) error {
+	student, assignments, scope, err := a.redoAssignmentsForStudent(studentID)
+	if err != nil {
+		return err
+	}
+	if scope != "" {
+		fmt.Fprintln(a.out, scope)
+	}
+
+	assignment := assignments[0]
+	if len(assignments) > 1 {
+		fmt.Fprintf(a.out, "Redo assignments for %s %s\n", student.FirstName, student.LastName)
+		for idx, item := range assignments {
+			fmt.Fprintf(a.out, "%d\t%s\t%s\t%s\n", idx+1, item.Title, item.Category, displayGradePlain(item.Record))
+		}
+		choice, err := a.promptRedoAssignmentChoice(len(assignments))
+		if err != nil {
+			return err
+		}
+		assignment = assignments[choice-1]
+	}
+
+	prev, err := a.currentGrade(assignment.ID, student.ID)
+	if err != nil {
+		return err
+	}
+	if err := a.saveGrade(assignment.ID, student.ID, gradeEntry{Flags: flagPass}, prev); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Recorded PASS for %s %s on %s\n", student.FirstName, student.LastName, assignment.Title)
+	return nil
+}
+
 func (a *App) FillPass() error {
 	ctx := a.context()
 	if ctx.AssignmentID == 0 || ctx.TermID == 0 || ctx.CourseYearID == 0 {
@@ -866,6 +921,86 @@ func (a *App) applyGradeEntryToStudent(studentID string, entry gradeEntry, label
 	}
 	fmt.Fprintf(a.out, "Recorded %s for %s %s\n", strings.ToUpper(label), student.FirstName, student.LastName)
 	return nil
+}
+
+func (a *App) redoAssignmentsForStudent(studentID string) (Student, []redoAssignment, string, error) {
+	ctx := a.context()
+	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return Student{}, nil, "", errors.New("set year, term, and course first")
+	}
+	if strings.TrimSpace(studentID) == "" {
+		var err error
+		studentID, err = a.prompt("Student")
+		if err != nil {
+			return Student{}, nil, "", err
+		}
+	}
+	student, err := a.resolveStudentReference(studentID)
+	if err != nil {
+		return Student{}, nil, "", err
+	}
+	scope := ""
+	if ctx.SectionID == 0 {
+		scope = "Using all sections in the current course."
+	}
+
+	rows, err := a.db.Query(`
+		SELECT assignments.assignment_id,
+		       assignments.title,
+		       categories.name,
+		       grades.score,
+		       COALESCE(grades.flags_bitmask, 0),
+		       assignments.max_points,
+		       COALESCE(grades.redo_count, 0),
+		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent, 80)
+		FROM assignments
+		JOIN categories ON categories.category_id = assignments.category_id
+		LEFT JOIN grades ON grades.assignment_id = assignments.assignment_id AND grades.student_pk = ?
+		LEFT JOIN category_grading_policies
+		  ON category_grading_policies.course_year_id = assignments.course_year_id
+		 AND category_grading_policies.term_id = assignments.term_id
+		 AND category_grading_policies.category_id = assignments.category_id
+		WHERE assignments.course_year_id = ? AND assignments.term_id = ?
+		ORDER BY assignments.assignment_id`, student.ID, ctx.CourseYearID, ctx.TermID)
+	if err != nil {
+		return Student{}, nil, "", err
+	}
+	defer rows.Close()
+
+	var assignments []redoAssignment
+	for rows.Next() {
+		var item redoAssignment
+		var passPercent sql.NullFloat64
+		if err := rows.Scan(&item.ID, &item.Title, &item.Category, &item.Record.Score, &item.Record.Flags, &item.Record.MaxPoints, &item.Record.RedoCount, &passPercent); err != nil {
+			return Student{}, nil, "", err
+		}
+		item.Record.PassPercent = passPercent
+		if hasActiveRedo(item.Record, passPercent) {
+			assignments = append(assignments, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Student{}, nil, "", err
+	}
+	if len(assignments) == 0 {
+		return Student{}, nil, "", fmt.Errorf("%s %s has no active redo assignments", student.FirstName, student.LastName)
+	}
+	return student, assignments, scope, nil
+}
+
+func (a *App) promptRedoAssignmentChoice(maxChoice int) (int, error) {
+	for {
+		raw, err := a.prompt("Choose assignment")
+		if err != nil {
+			return 0, err
+		}
+		choice, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || choice < 1 || choice > maxChoice {
+			fmt.Fprintln(a.out, retryMessage(fmt.Sprintf("enter a number between 1 and %d", maxChoice)))
+			continue
+		}
+		return choice, nil
+	}
 }
 
 func (a *App) clearGradeFlag(studentID string, flag int, label string) error {

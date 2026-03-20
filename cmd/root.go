@@ -52,6 +52,7 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		newEnterCmd(gradesApp),
 		newShowCmd(gradesApp),
 		newPassCmd(gradesApp),
+		newRedoCmd(gradesApp),
 		newFillCmd(gradesApp),
 		newMarkLateCmd(gradesApp),
 		newClearLateCmd(gradesApp),
@@ -65,6 +66,8 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		legacyHidden(newRepairCmd(gradesApp)),
 		newImportCmd(gradesApp),
 		newExportCmd(gradesApp),
+		newPublishCmd(gradesApp),
+		newWebCmd(gradesApp),
 		legacyHidden(newMigrateCmd(gradesApp)),
 		legacyHidden(newDBCmd(gradesApp)),
 	)
@@ -433,6 +436,14 @@ func newAssignmentsCmd(a *app.App) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
+		Use:   "edit",
+		Args:  cobra.NoArgs,
+		Short: "Edit the current assignment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.EditAssignmentInteractive()
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
 		Use:  "delete [assignment-id]",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -466,7 +477,10 @@ func newAssignmentsCmd(a *app.App) *cobra.Command {
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 && (args[0] == "-all" || args[0] == "--all") {
-				return a.ExportPendingAssignments()
+				if err := a.ExportPendingAssignments(); err != nil {
+					return err
+				}
+				return a.PublishStudentPortal("")
 			}
 			if len(args) > 1 {
 				return fmt.Errorf("assignments export accepts either [file] or -all")
@@ -475,7 +489,10 @@ func newAssignmentsCmd(a *app.App) *cobra.Command {
 			if len(args) == 1 {
 				file = args[0]
 			}
-			return a.ExportGrades(file)
+			if err := a.ExportGrades(file); err != nil {
+				return err
+			}
+			return a.PublishStudentPortal("")
 		},
 	})
 	curveCmd := &cobra.Command{
@@ -521,6 +538,7 @@ func newGradesCmd(a *app.App) *cobra.Command {
 		newEnterCmd(a),
 		newShowCmd(a),
 		newPassCmd(a),
+		newRedoCmd(a),
 		newFillCmd(a),
 		newMarkLateCmd(a),
 		newClearLateCmd(a),
@@ -572,6 +590,31 @@ func newPassCmd(a *app.App) *cobra.Command {
 			return a.PassStudent(strings.Join(args, " "))
 		},
 	}
+}
+
+func newRedoCmd(a *app.App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "redo",
+		Short: "List or pass redo work for a student without switching assignments",
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list <student>",
+		Args:  cobra.ArbitraryArgs,
+		Short: "List active redo assignments for a student",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.ListStudentRedo(strings.Join(args, " "))
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "pass <student>",
+		Args:  cobra.ArbitraryArgs,
+		Short: "Mark one redo assignment as pass for a student",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.PassStudentRedo(strings.Join(args, " "))
+		},
+	})
+	return cmd
 }
 
 func newFillCmd(a *app.App) *cobra.Command {
@@ -775,7 +818,10 @@ func newExportCmd(a *app.App) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "Export all unexported or modified assignments in the current course and term",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.ExportPendingAssignments()
+			if err := a.ExportPendingAssignments(); err != nil {
+				return err
+			}
+			return a.PublishStudentPortal("")
 		},
 	}
 	cmd.AddCommand(&cobra.Command{
@@ -786,9 +832,81 @@ func newExportCmd(a *app.App) *cobra.Command {
 			if len(args) == 1 {
 				file = args[0]
 			}
-			return a.ExportGrades(file)
+			if err := a.ExportGrades(file); err != nil {
+				return err
+			}
+			return a.PublishStudentPortal("")
 		},
 	})
+	return cmd
+}
+
+func newPublishCmd(a *app.App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "publish [dir]",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Publish student portal data for the current course and term",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := ""
+			if len(args) == 1 {
+				dir = args[0]
+			}
+			return a.PublishStudentPortal(dir)
+		},
+	}
+}
+
+func newWebCmd(a *app.App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "web",
+		Short: "Student portal commands",
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "serve [addr] [dir]",
+		Args:  cobra.MaximumNArgs(2),
+		Short: "Serve the student portal locally",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			addr := ""
+			dir := ""
+			if len(args) >= 1 {
+				addr = args[0]
+			}
+			if len(args) == 2 {
+				dir = args[1]
+			}
+			return a.ServeStudentPortal(addr, dir)
+		},
+	})
+	accounts := &cobra.Command{
+		Use:   "accounts",
+		Short: "Manage student portal accounts",
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
+	accounts.AddCommand(&cobra.Command{
+		Use:   "init [default-password]",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Create portal accounts for students in the current course and term",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			password := ""
+			if len(args) == 1 {
+				password = args[0]
+			}
+			return a.InitStudentPortalAccounts(password)
+		},
+	})
+	resetCmd := &cobra.Command{
+		Use:   "reset <student>",
+		Args:  cobra.MinimumNArgs(1),
+		Short: "Reset a student's portal password",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			password, _ := cmd.Flags().GetString("password")
+			return a.ResetStudentPortalPassword(strings.Join(args, " "), password)
+		},
+	}
+	resetCmd.Flags().StringP("password", "p", "", "temporary password to set")
+	accounts.AddCommand(resetCmd)
+	cmd.AddCommand(accounts)
 	return cmd
 }
 

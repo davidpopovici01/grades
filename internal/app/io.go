@@ -374,7 +374,7 @@ func (a *App) exportAssignmentByID(assignmentID, termID, courseYearID int, file 
 	}
 	fmt.Fprintf(a.out, "Assignment Name:\t%s\n", document.Meta.Title)
 	fmt.Fprintf(a.out, "Category:\t%s\n", document.Meta.Category)
-	fmt.Fprintf(a.out, "Max Points:\t%.1f\n", document.Meta.MaxPoints)
+	fmt.Fprintf(a.out, "Max Points:\t100.0\n")
 
 	if strings.TrimSpace(file) == "" {
 		file, err = a.defaultAssignmentExportPath(document.Meta.Title)

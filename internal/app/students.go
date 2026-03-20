@@ -112,16 +112,26 @@ func (a *App) RemoveStudentInteractive(studentID string) error {
 	}
 	var res sql.Result
 	if ctx.SectionID != 0 {
-		res, err = a.db.Exec(`DELETE FROM section_enrollments WHERE section_id = ? AND term_id = ? AND student_pk = ?`, ctx.SectionID, ctx.TermID, student.ID)
+		res, err = a.db.Exec(`
+			DELETE FROM section_enrollments
+			WHERE section_id = ?
+			  AND student_pk = ?
+			  AND term_id IN (
+				SELECT term_id
+				FROM course_year_terms
+				WHERE course_year_id = (
+					SELECT course_year_id FROM sections WHERE section_id = ?
+				)
+			  )`, ctx.SectionID, student.ID, ctx.SectionID)
 		if err != nil {
 			return err
 		}
 	} else {
 		res, err = a.db.Exec(`
 			DELETE FROM section_enrollments
-			WHERE student_pk = ? AND term_id = ? AND section_id IN (
+			WHERE student_pk = ? AND section_id IN (
 				SELECT section_id FROM sections WHERE course_year_id = ?
-			)`, student.ID, ctx.TermID, ctx.CourseYearID)
+			)`, student.ID, ctx.CourseYearID)
 		if err != nil {
 			return err
 		}

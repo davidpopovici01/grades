@@ -25,6 +25,15 @@ var passRatesSQL string
 //go:embed sql/006_assignment_exports.sql
 var assignmentExportsSQL string
 
+//go:embed sql/007_student_portal.sql
+var studentPortalSQL string
+
+//go:embed sql/008_submissions.sql
+var submissionsSQL string
+
+//go:embed sql/009_submission_kind.sql
+var submissionKindSQL string
+
 type migration struct {
 	version string
 	sql     string
@@ -37,6 +46,9 @@ var migrations = []migration{
 	{version: "004_grading_models", sql: gradingModelsSQL},
 	{version: "005_pass_rates", sql: passRatesSQL},
 	{version: "006_assignment_exports", sql: assignmentExportsSQL},
+	{version: "007_student_portal", sql: studentPortalSQL},
+	{version: "008_submissions", sql: submissionsSQL},
+	{version: "009_submission_kind", sql: submissionKindSQL},
 }
 
 func Up(db *sql.DB) error {
@@ -69,6 +81,10 @@ func Down(db *sql.DB) error {
 		`DROP TABLE IF EXISTS grades;`,
 		`DROP TABLE IF EXISTS assignment_curves;`,
 		`DROP TABLE IF EXISTS assignment_exports;`,
+		`DROP TABLE IF EXISTS submission_files;`,
+		`DROP TABLE IF EXISTS submission_attempts;`,
+		`DROP TABLE IF EXISTS submission_policies;`,
+		`DROP TABLE IF EXISTS student_accounts;`,
 		`DROP TABLE IF EXISTS assignments;`,
 		`DROP TABLE IF EXISTS category_grading_policies;`,
 		`DROP TABLE IF EXISTS category_aliases;`,

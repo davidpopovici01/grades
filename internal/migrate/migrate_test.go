@@ -74,6 +74,18 @@ func TestUp_AppliesOnce(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected schema_migrations to contain 006_assignment_exports once, got %d", count)
 	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version='007_student_portal';`).Scan(&count); err != nil {
+		t.Fatalf("schema_migrations query failed for 007: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected schema_migrations to contain 007_student_portal once, got %d", count)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version='008_submissions';`).Scan(&count); err != nil {
+		t.Fatalf("schema_migrations query failed for 008: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected schema_migrations to contain 008_submissions once, got %d", count)
+	}
 
 	var weightColumn int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('assignments') WHERE name='weight_percent';`).Scan(&weightColumn); err != nil {
@@ -137,5 +149,21 @@ func TestUp_AppliesOnce(t *testing.T) {
 	}
 	if assignmentExportsTable != 1 {
 		t.Fatalf("expected assignment_exports table to exist, got %d", assignmentExportsTable)
+	}
+
+	var studentAccountsTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='student_accounts';`).Scan(&studentAccountsTable); err != nil {
+		t.Fatalf("student_accounts table query failed: %v", err)
+	}
+	if studentAccountsTable != 1 {
+		t.Fatalf("expected student_accounts table to exist, got %d", studentAccountsTable)
+	}
+
+	var submissionPoliciesTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='submission_policies';`).Scan(&submissionPoliciesTable); err != nil {
+		t.Fatalf("submission_policies table query failed: %v", err)
+	}
+	if submissionPoliciesTable != 1 {
+		t.Fatalf("expected submission_policies table to exist, got %d", submissionPoliciesTable)
 	}
 }

@@ -25,8 +25,18 @@ func (a *App) PrintDashboard() error {
 	fmt.Fprintf(a.out, "  Assignment:\t%s\n", fallback(assignmentName))
 	fmt.Fprintln(a.out)
 	fmt.Fprintln(a.out, "Next steps")
-	fmt.Fprintln(a.out, "  - grades students list")
-	fmt.Fprintln(a.out, "  - grades grades enter")
+	fmt.Fprintln(a.out, "  - grades setup to add a new course")
+	if ctx.CourseYearID == 0 || ctx.TermID == 0 {
+		fmt.Fprintln(a.out, "  - grades students list after setting year, term, and course")
+	} else {
+		fmt.Fprintln(a.out, "  - grades students list")
+	}
+	if ctx.AssignmentID == 0 {
+		fmt.Fprintln(a.out, "  - grades use assignment <name> to switch to an assignment")
+	} else {
+		fmt.Fprintln(a.out, "  - grades enter to enter grades")
+		fmt.Fprintln(a.out, "  - grades show to review the current assignment")
+	}
 	return nil
 }
 

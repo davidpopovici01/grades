@@ -139,6 +139,50 @@ func TestRemoveStudentUsesAllSectionsAndNameLookupWhenSectionUnset(t *testing.T)
 	}
 }
 
+func TestRemoveStudentFromSelectedSectionRemovesAcrossTermsAndRosterTemplate(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO terms(term_id, name, start_date, end_date) VALUES (2, 'Spring 2027', '2027-01-10', '2027-06-01')`); err != nil {
+		t.Fatalf("insert second term: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO course_year_terms(course_year_id, term_id) VALUES (1, 2)`); err != nil {
+		t.Fatalf("insert second course year term: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (10, 'Alice', 'Brown', '3001')`); err != nil {
+		t.Fatalf("insert student: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active'), (1, 10, 2, '2027-01-10', 'active')`); err != nil {
+		t.Fatalf("insert enrollments: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+
+	out := mustRun(t, env, "", "students", "remove", "Alice")
+	assertContains(t, out, "Removed Alice Brown")
+
+	var count int
+	if err := dbConn.QueryRow(`SELECT COUNT(*) FROM section_enrollments WHERE student_pk = 10`).Scan(&count); err != nil {
+		t.Fatalf("count enrollments after remove: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected student to be removed from selected section across all terms, got %d enrollments", count)
+	}
+
+	mustRun(t, env, "", "import", "setup-csv")
+	templatePath := filepath.Join(env.home, "roster_setup.csv")
+	data, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatalf("read roster template: %v", err)
+	}
+	content := string(data)
+	assertNotContains(t, content, "2026-27,APCSA,12A,3001,Alice,Brown,")
+}
+
 func TestStudentManagementAndImport(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
@@ -1235,6 +1279,84 @@ func TestPassCommandMarksStudentPassAndKeepsFlags(t *testing.T) {
 	assertContains(t, show, "P (late)")
 }
 
+func TestRedoListAndPassRespectSelectedSection(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO sections(section_id, course_year_id, name) VALUES (2, 1, '12B')`); err != nil {
+		t.Fatalf("insert extra section: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (10, 'Alice', 'Brown', '3001'), (11, 'Bob', 'Zhang', '3002')`); err != nil {
+		t.Fatalf("insert students: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active'), (2, 11, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollments: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'HW1', 10)`); err != nil {
+		t.Fatalf("insert assignment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask) VALUES (1, 10, 7, ?), (1, 11, 7, ?)`, testFlagRedo, testFlagRedo); err != nil {
+		t.Fatalf("insert grades: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+
+	list := mustRun(t, env, "", "redo", "list", "Alice")
+	assertContains(t, list, "Redo assignments for Alice Brown")
+	assertContains(t, list, "HW1")
+
+	_, errText := runWithError(t, env, "", "redo", "list", "Bob")
+	assertContains(t, errText, `no student matched "bob"`)
+
+	out := mustRun(t, env, "", "redo", "pass", "Alice")
+	assertContains(t, out, "Recorded PASS for Alice Brown on HW1")
+
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "Alice Brown")
+	assertContains(t, show, "P")
+}
+
+func TestRedoCommandsUseAllSectionsWhenNoSectionSelected(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO sections(section_id, course_year_id, name) VALUES (2, 1, '12B')`); err != nil {
+		t.Fatalf("insert extra section: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (10, 'Bob', 'Zhang', '3002')`); err != nil {
+		t.Fatalf("insert student: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (2, 10, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'HW1', 10), (2, 1, 1, 1, 'HW2', 10)`); err != nil {
+		t.Fatalf("insert assignments: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask) VALUES (1, 10, 7, ?), (2, 10, 6, ?)`, testFlagRedo, testFlagRedo); err != nil {
+		t.Fatalf("insert grades: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+
+	list := mustRun(t, env, "", "redo", "list", "Bob")
+	assertContains(t, list, "Using all sections in the current course.")
+	assertContains(t, list, "HW1")
+	assertContains(t, list, "HW2")
+
+	pass := mustRun(t, env, "2\n", "redo", "pass", "Bob")
+	assertContains(t, pass, "Using all sections in the current course.")
+	assertContains(t, pass, "Choose assignment:")
+	assertContains(t, pass, "Recorded PASS for Bob Zhang on HW2")
+}
+
 func TestStudentsShowUsesNameLookupAndShowsDetailedBreakdown(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
@@ -1304,7 +1426,7 @@ func TestAssignmentExportUsesAllSectionsAndPowerSchoolFormat(t *testing.T) {
 	out := mustRun(t, env, "y\n", "assignments", "export", exportPath)
 	assertContains(t, out, "Assignment Name:\tHW1")
 	assertContains(t, out, "Category:\tExam")
-	assertContains(t, out, "Max Points:\t1.0")
+	assertContains(t, out, "Max Points:\t100.0")
 	assertContains(t, out, "Marked assignment as exported.")
 
 	data, err := os.ReadFile(exportPath)
@@ -2117,6 +2239,103 @@ func TestContextAndSystemGroupsShowCanonicalHelp(t *testing.T) {
 	assertContains(t, systemHelp, "db")
 	assertContains(t, systemHelp, "migrate")
 	assertContains(t, systemHelp, "repair")
+}
+
+func TestDashboardShowsHelpfulNextStepHints(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+
+	dashboard := mustRun(t, env, "")
+	assertContains(t, dashboard, "grades setup to add a new course")
+	assertContains(t, dashboard, "grades use assignment <name> to switch to an assignment")
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "Quiz\n10\nExam\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Quiz")
+
+	dashboardWithAssignment := mustRun(t, env, "")
+	assertContains(t, dashboardWithAssignment, "grades enter to enter grades")
+	assertContains(t, dashboardWithAssignment, "grades show to review the current assignment")
+}
+
+func TestPublishCommandWritesStudentPortalSnapshots(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}, {"Bob", "Zhang", "3002"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "categories", "set-scheme", "Exam", "average")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "100")
+	mustRun(t, env, "Midterm Exam\n100\nExam\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Midterm Exam")
+	mustRun(t, env, "ali\n88\nbz\n91\n\n", "grades", "enter")
+	mustRun(t, env, "", "web", "accounts", "init", "TempPass123")
+
+	out := mustRun(t, env, "", "publish")
+	assertContains(t, out, "Published student portal")
+	assertContains(t, out, "Published 2 student snapshot(s)")
+
+	indexPath := filepath.Join(env.home, "..", "gradesPublished", "index.json")
+	studentPath := filepath.Join(env.home, "..", "gradesPublished", "students", "1.json")
+	indexData, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read published index: %v", err)
+	}
+	studentData, err := os.ReadFile(studentPath)
+	if err != nil {
+		t.Fatalf("read published student snapshot: %v", err)
+	}
+	assertContains(t, string(indexData), `"studentCount": 2`)
+	assertContains(t, string(studentData), `"username": "3001"`)
+	assertContains(t, string(studentData), `"weightedTotalLabel": "88.0%"`)
+}
+
+func TestAssignmentExportAlsoPublishesStudentPortal(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "categories", "set-scheme", "Exam", "average")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "100")
+	mustRun(t, env, "Midterm Exam\n100\nExam\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Midterm Exam")
+	mustRun(t, env, "ali\n92\n\n", "grades", "enter")
+	mustRun(t, env, "", "web", "accounts", "init", "TempPass123")
+
+	exportPath := filepath.Join(env.home, "midterm.csv")
+	out := mustRun(t, env, "y\n", "assignments", "export", exportPath)
+	assertContains(t, out, "Exported grades")
+	assertContains(t, out, "Published student portal")
+
+	studentPath := filepath.Join(env.home, "..", "gradesPublished", "students", "1.json")
+	data, err := os.ReadFile(studentPath)
+	if err != nil {
+		t.Fatalf("read published student snapshot after export: %v", err)
+	}
+	assertContains(t, string(data), `"weightedTotalLabel": "92.0%"`)
+}
+
+func TestWebAccountsResetAcceptsMultiWordStudentReference(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "web", "accounts", "init", "TempPass123")
+
+	out := mustRun(t, env, "", "web", "accounts", "reset", "Alice", "Brown", "--password", "FreshPass456")
+	assertContains(t, out, "Reset portal password for Alice Brown")
+	assertContains(t, out, "Temporary password:\tFreshPass456")
 }
 
 func TestRepairAuditAndApplyNormalizeLegacyGradeRows(t *testing.T) {

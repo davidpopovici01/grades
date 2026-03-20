@@ -163,6 +163,70 @@ func (a *App) ShowAssignment(idRaw string) error {
 	return nil
 }
 
+func (a *App) EditAssignmentInteractive() error {
+	ctx := a.context()
+	if ctx.AssignmentID == 0 {
+		return errors.New("set an assignment first")
+	}
+	var title string
+	var maxPoints int
+	var categoryID int
+	var categoryName string
+	var assignmentPass sql.NullFloat64
+	if err := a.db.QueryRow(`
+		SELECT assignments.title, assignments.max_points, assignments.category_id, categories.name, assignments.pass_percent
+		FROM assignments
+		JOIN categories ON categories.category_id = assignments.category_id
+		WHERE assignments.assignment_id = ?`, ctx.AssignmentID).
+		Scan(&title, &maxPoints, &categoryID, &categoryName, &assignmentPass); err != nil {
+		return err
+	}
+	rawTitle, err := a.promptOptional(fmt.Sprintf("Title (%s)", title))
+	if err != nil {
+		return err
+	}
+	if rawTitle != "" {
+		title = rawTitle
+	}
+	rawMax, err := a.promptOptional(fmt.Sprintf("Max score (%d)", maxPoints))
+	if err != nil {
+		return err
+	}
+	if rawMax != "" {
+		value, err := strconv.Atoi(rawMax)
+		if err != nil || value <= 0 {
+			return fmt.Errorf("invalid max score: %s", rawMax)
+		}
+		maxPoints = value
+	}
+	rawCategory, err := a.promptOptional(fmt.Sprintf("Category (%s)", categoryName))
+	if err != nil {
+		return err
+	}
+	if rawCategory != "" {
+		categoryID, categoryName, err = a.resolveCategoryInteractive(rawCategory)
+		if err != nil {
+			return err
+		}
+	}
+	rawPass, err := a.promptOptional(fmt.Sprintf("Pass rate (%s)", passPercentLabel(assignmentPass, true)))
+	if err != nil {
+		return err
+	}
+	if rawPass != "" {
+		assignmentPass, err = parseAssignmentPassRate(rawPass)
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := a.db.Exec(`UPDATE assignments SET title = ?, max_points = ?, category_id = ?, pass_percent = ? WHERE assignment_id = ?`,
+		title, maxPoints, categoryID, nullablePassRateValue(assignmentPass), ctx.AssignmentID); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Updated assignment: %s\n", title)
+	return nil
+}
+
 func (a *App) DeleteAssignment(idRaw string) error {
 	id, err := a.assignmentIDFromInput(idRaw)
 	if err != nil {
