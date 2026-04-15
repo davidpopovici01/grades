@@ -39,6 +39,7 @@ go.work.sum
 # Local Codex/test caches
 .appdata/
 .gocache/
+.gocache-test/
 .gomodcache/
 .gotelemetry/
 .grades-home/
@@ -50,3 +51,5 @@ roster_setup.csv
 categories_setup.csv
 grades-test-size.exe
 dist/
+.tmp-study-report.docx
+study-reports/

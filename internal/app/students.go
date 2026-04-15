@@ -261,7 +261,7 @@ func (a *App) studentAssignmentDetails(studentID int) ([]studentAssignmentDetail
 		       categories.name,
 		       COALESCE(category_grading_policies.scheme_key, 'average'),
 		       COALESCE(assignment_curves.anchor_percent, 100),
-		       COALESCE(assignment_curves.lift_percent, 0),
+		       COALESCE(assignment_curves.lift_percent, 1),
 		       grades.score,
 		       COALESCE(grades.flags_bitmask, 0),
 		       assignments.max_points,

@@ -1,9 +1,11 @@
 package cmd_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -564,9 +566,13 @@ func TestGradesGradebookStatsAndExport(t *testing.T) {
 
 	gradesOut := mustRun(t, env, "", "grades", "show")
 	assertContains(t, gradesOut, "Alice Brown")
+	assertContains(t, gradesOut, "Uncurved average:\t79.0%")
+	assertContains(t, gradesOut, "Curved average:\t\t0.0%")
 	assertContains(t, gradesOut, "79 (redo)")
+	assertContains(t, gradesOut, "counts as 0.0%")
 	assertContains(t, gradesOut, "Bob Zhang")
 	assertContains(t, gradesOut, "M")
+	assertContains(t, gradesOut, "counts as 0.0%")
 
 	dbConn := openSeedDB(t, env)
 	defer dbConn.Close()
@@ -1279,6 +1285,40 @@ func TestPassCommandMarksStudentPassAndKeepsFlags(t *testing.T) {
 	assertContains(t, show, "P (late)")
 }
 
+func TestPassCommandKeepsExistingRedoFlagBit(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nr\n\n", "enter")
+
+	out := mustRun(t, env, "", "pass", "Alice")
+	assertContains(t, out, "Recorded PASS for Alice Brown")
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "Alice Brown")
+	assertContains(t, show, "P")
+
+	var flags int
+	if err := dbConn.QueryRow(`SELECT flags_bitmask FROM grades WHERE assignment_id = 1 AND student_pk = 1`).Scan(&flags); err != nil {
+		t.Fatalf("query flags: %v", err)
+	}
+	if flags&testFlagRedo == 0 {
+		t.Fatalf("expected redo flag to stay set, got flags %d", flags)
+	}
+
+	_, errText := runWithError(t, env, "", "redo", "list", "Alice")
+	assertContains(t, errText, "Alice Brown has no active redo assignments")
+}
+
 func TestRedoListAndPassRespectSelectedSection(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
@@ -1312,7 +1352,9 @@ func TestRedoListAndPassRespectSelectedSection(t *testing.T) {
 	_, errText := runWithError(t, env, "", "redo", "list", "Bob")
 	assertContains(t, errText, `no student matched "bob"`)
 
-	out := mustRun(t, env, "", "redo", "pass", "Alice")
+	out := mustRun(t, env, "1\n", "redo", "pass", "Alice")
+	assertContains(t, out, "Redo assignments for Alice Brown")
+	assertContains(t, out, "Choose assignment:")
 	assertContains(t, out, "Recorded PASS for Alice Brown on HW1")
 
 	mustRun(t, env, "", "use", "assignment", "HW1")
@@ -1355,6 +1397,132 @@ func TestRedoCommandsUseAllSectionsWhenNoSectionSelected(t *testing.T) {
 	assertContains(t, pass, "Using all sections in the current course.")
 	assertContains(t, pass, "Choose assignment:")
 	assertContains(t, pass, "Recorded PASS for Bob Zhang on HW2")
+}
+
+func TestRedoListDoesNotShowMissingAssignments(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nm\n\n", "enter")
+
+	_, errText := runWithError(t, env, "", "redo", "list", "Alice")
+	assertContains(t, errText, "Alice Brown has no active redo assignments")
+}
+
+func TestRedoPassKeepsExistingRedoFlagBit(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nr\n\n", "enter")
+
+	pass := mustRun(t, env, "1\n", "redo", "pass", "Alice")
+	assertContains(t, pass, "Redo assignments for Alice Brown")
+	assertContains(t, pass, "Choose assignment:")
+	assertContains(t, pass, "Recorded PASS for Alice Brown on HW1")
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "P")
+
+	var flags int
+	if err := dbConn.QueryRow(`SELECT flags_bitmask FROM grades WHERE assignment_id = 1 AND student_pk = 1`).Scan(&flags); err != nil {
+		t.Fatalf("query flags: %v", err)
+	}
+	if flags&testFlagRedo == 0 {
+		t.Fatalf("expected redo flag to stay set, got flags %d", flags)
+	}
+
+	_, errText := runWithError(t, env, "", "redo", "list", "Alice")
+	assertContains(t, errText, "Alice Brown has no active redo assignments")
+}
+
+func TestMakeupListAndEnterForMissingAndLateWork(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nm\n\n", "enter")
+	mustRun(t, env, "HW2\n10\nHomework\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW2")
+	mustRun(t, env, "ali\nl\n\n", "enter")
+
+	list := mustRun(t, env, "", "make-up", "list", "Alice")
+	assertContains(t, list, "Make-up assignments for Alice Brown")
+	assertContains(t, list, "HW1")
+	assertContains(t, list, "HW2")
+
+	enter := mustRun(t, env, "2\n8\n", "make-up", "enter", "Alice")
+	assertContains(t, enter, "Recorded 8 for Alice Brown on HW2")
+
+	mustRun(t, env, "", "use", "assignment", "HW2")
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "8L")
+}
+
+func TestMakeupPassForSingleAssignment(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nm\n\n", "enter")
+
+	out := mustRun(t, env, "1\n", "make-up", "pass", "Alice")
+	assertContains(t, out, "Make-up assignments for Alice Brown")
+	assertContains(t, out, "Choose assignment:")
+	assertContains(t, out, "Recorded PASS for Alice Brown on HW1")
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "P")
+	assertNotContains(t, show, "Alice Brown  \x1b[31mM\x1b[0m")
+}
+
+func TestMakeupEnterForSingleAssignmentStillPromptsForChoice(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nm\n\n", "enter")
+
+	out := mustRun(t, env, "1\n8\n", "make-up", "enter", "Alice")
+	assertContains(t, out, "Make-up assignments for Alice Brown")
+	assertContains(t, out, "Choose assignment:")
+	assertContains(t, out, "Recorded 8 for Alice Brown on HW1")
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "8")
 }
 
 func TestStudentsShowUsesNameLookupAndShowsDetailedBreakdown(t *testing.T) {
@@ -1879,7 +2047,7 @@ func TestFillPassFillsBlankAndMissingEntries(t *testing.T) {
 	assertNotContains(t, show, "Bob Zhang  M")
 }
 
-func TestLowScoreSetsRedoFlag(t *testing.T) {
+func TestLowScoreSetsRedoFlagForPassRateAssignments(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
 	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
@@ -1888,13 +2056,53 @@ func TestLowScoreSetsRedoFlag(t *testing.T) {
 	mustRun(t, env, "", "use", "term", "Fall 2026")
 	mustRun(t, env, "", "use", "course", "1")
 	mustRun(t, env, "", "use", "section", "12A")
-	mustRun(t, env, "Quiz\n10\nExam\n", "assignments", "add")
-	mustRun(t, env, "", "use", "assignment", "Quiz")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
 	mustRun(t, env, "ali\n7\n\n", "grades", "enter")
 
 	show := mustRun(t, env, "", "grades", "show")
 	assertContains(t, show, "Alice Brown")
 	assertContains(t, show, "7 (redo)")
+	assertContains(t, show, "counts as 0.0%")
+}
+
+func TestRawNumericAssignmentsDoNotShowRedo(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "Quiz\n10\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Quiz")
+	mustRun(t, env, "ali\n7\n\n", "grades", "enter")
+
+	show := mustRun(t, env, "", "grades", "show")
+	assertContains(t, show, "Alice Brown")
+	assertContains(t, show, "Uncurved average:\t70.0%")
+	assertContains(t, show, "Curved average:\t\t70.0%")
+	assertContains(t, show, "counts as 70.0%")
+	assertNotContains(t, show, "(redo)")
+}
+
+func TestGradesShowAveragesIgnoreMissingAndLate(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}, {"Bob", "Zhang", "3002"}, {"Carol", "Lin", "3003"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "Quiz\n10\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Quiz")
+	mustRun(t, env, "ali\n8\nbz\nm\ncar\n9l\n\n", "grades", "enter")
+
+	show := mustRun(t, env, "", "grades", "show")
+	assertContains(t, show, "Uncurved average:\t80.0%")
+	assertContains(t, show, "Curved average:\t\t80.0%")
 }
 
 func TestFailAliasSetsRedoFlag(t *testing.T) {
@@ -1932,6 +2140,8 @@ func TestLateOnlyAndScorePlusRedoInputs(t *testing.T) {
 	assertContains(t, show, "L")
 	assertContains(t, show, "Bob Zhang")
 	assertContains(t, show, "19 (redo)")
+	assertContains(t, show, "Uncurved average:\t95.0%")
+	assertContains(t, show, "Curved average:\t\t90.0%")
 }
 
 func TestEnterLastNameModePromptsInOrder(t *testing.T) {
@@ -2029,6 +2239,9 @@ func TestOverviewShowsRedoForLegacyLowScoreWithoutRedoFlag(t *testing.T) {
 	}
 	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active')`); err != nil {
 		t.Fatalf("insert enrollment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO category_grading_policies(course_year_id, term_id, category_id, scheme_key, default_pass_percent) VALUES (1, 1, 1, 'completion', 80)`); err != nil {
+		t.Fatalf("insert category policy: %v", err)
 	}
 	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'HW1', 100)`); err != nil {
 		t.Fatalf("insert assignment: %v", err)
@@ -2169,11 +2382,10 @@ func TestCategorySchemesCurvesAndCategoryScores(t *testing.T) {
 	mustRun(t, env, "", "use", "assignment", "Unit Test")
 	mustRun(t, env, "ali\n50\nbz\n100\n\n", "grades", "enter")
 
-	curveSet := mustRun(t, env, "", "assignments", "curve", "set", "100", "50")
-	assertContains(t, curveSet, "Set assignment curve: anchor 100.0, lift 50.0")
+	curveSet := mustRun(t, env, "", "assignments", "curve", "set", "0.5")
+	assertContains(t, curveSet, "Set assignment curve: lift 0.500000")
 	curveShow := mustRun(t, env, "", "assignments", "curve", "show")
-	assertContains(t, curveShow, "Curve anchor:\t100.0")
-	assertContains(t, curveShow, "Curve lift:\t50.0")
+	assertContains(t, curveShow, "Curve lift:\t0.500000")
 
 	schemes := mustRun(t, env, "", "categories", "schemes")
 	assertContains(t, schemes, "completion")
@@ -2207,16 +2419,20 @@ func TestAssignmentCurveTarget(t *testing.T) {
 	mustRun(t, env, "", "use", "course", "1")
 	mustRun(t, env, "", "use", "section", "12A")
 
-	mustRun(t, env, "Curve Test\n100\nExam\n", "assignments", "add")
+	mustRun(t, env, "Curve Test\n100\nExam\nraw\n", "assignments", "add")
 	mustRun(t, env, "", "use", "assignment", "Curve Test")
 	mustRun(t, env, "ali\n50\nbz\n100\n\n", "grades", "enter")
 
 	targetOut := mustRun(t, env, "", "assignments", "curve", "target", "85")
 	assertContains(t, targetOut, "Set assignment curve target 85.0")
+	assertContains(t, targetOut, "(average 85.0000%)")
 
 	show := mustRun(t, env, "", "assignments", "curve", "show")
-	assertContains(t, show, "Curve anchor:\t100.0")
-	assertNotContains(t, show, "Curve lift:\t0.0")
+	assertNotContains(t, show, "Curve anchor:")
+	assertNotContains(t, show, "Curve lift:\t1.000000")
+	curvedShow := mustRun(t, env, "", "grades", "show")
+	assertContains(t, curvedShow, "Uncurved average:\t75.0%")
+	assertContains(t, curvedShow, "Curved average:\t\t85.0%")
 }
 
 func TestBareCommandShowsHelp(t *testing.T) {
@@ -2239,6 +2455,156 @@ func TestContextAndSystemGroupsShowCanonicalHelp(t *testing.T) {
 	assertContains(t, systemHelp, "db")
 	assertContains(t, systemHelp, "migrate")
 	assertContains(t, systemHelp, "repair")
+}
+
+func TestReportsSuggestStudentsForStudyReports(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}, {"Bob", "Zhang", "3002"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "100")
+	mustRun(t, env, "Test 1\n100\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Test 1")
+	mustRun(t, env, "ali\n50\nbz\n92\n\n", "grades", "enter")
+	mustRun(t, env, "Test 2\n100\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Test 2")
+	mustRun(t, env, "ali\n60\nbz\n95\n\n", "grades", "enter")
+
+	out := mustRun(t, env, "", "reports", "suggest")
+	assertContains(t, out, "Alice Brown\t55.0%\tF")
+	assertContains(t, out, "test average is 55.0% across 2 test(s)")
+	assertNotContains(t, out, "Bob Zhang")
+}
+
+func TestReportsSuggestDoesNotCountQuizzesAsTests(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "100")
+	mustRun(t, env, "Quiz 1\n100\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Quiz 1")
+	mustRun(t, env, "ali\n50\n\n", "grades", "enter")
+	mustRun(t, env, "Quiz 2\n100\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Quiz 2")
+	mustRun(t, env, "ali\n60\n\n", "grades", "enter")
+
+	out := mustRun(t, env, "", "reports", "suggest")
+	assertContains(t, out, "Alice Brown\t55.0%\tF")
+	assertNotContains(t, out, "test average is")
+}
+
+func TestReportsCreateFillsStudyReportTemplate(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "100")
+	mustRun(t, env, "Test 1\n100\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Test 1")
+	mustRun(t, env, "ali\n58\n\n", "grades", "enter")
+	mustRun(t, env, "Homework 1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Homework 1")
+	mustRun(t, env, "ali\nm\n\n", "grades", "enter")
+
+	output := filepath.Join(env.home, "alice-study-report.docx")
+	out := mustRun(t, env, "", "reports", "create", "Alice", output)
+	assertContains(t, out, "Created study report for Alice Brown")
+
+	reader, err := zip.OpenReader(output)
+	if err != nil {
+		t.Fatalf("open report zip: %v", err)
+	}
+	defer reader.Close()
+	var document string
+	for _, file := range reader.File {
+		if file.Name != "word/document.xml" {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatalf("open document.xml: %v", err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatalf("read document.xml: %v", err)
+		}
+		document = string(data)
+	}
+	assertContains(t, document, "Alice Brown")
+	assertContains(t, document, "Mr Popovici")
+	assertContains(t, document, "APCSA")
+	assertContains(t, document, "58.0% (F)")
+	assertContains(t, document, "Teacher comments/recommendations:")
+	assertContains(t, document, "Missing assignments")
+	assertContains(t, document, "Low test scores")
+}
+
+func TestReportsIgnoreCompletedLateAndRedoFlags(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "100")
+	mustRun(t, env, "Test 1\n100\nExam\nraw\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Test 1")
+	mustRun(t, env, "ali\n58\n\n", "grades", "enter")
+	mustRun(t, env, "Homework 1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Homework 1")
+	mustRun(t, env, "ali\n10l\n\n", "grades", "enter")
+	mustRun(t, env, "Homework 2\n10\nHomework\n\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Homework 2")
+	mustRun(t, env, "ali\n9r\n\n", "grades", "enter")
+
+	output := filepath.Join(env.home, "alice-study-report-completed-flags.docx")
+	out := mustRun(t, env, "", "reports", "create", "Alice", output)
+	assertContains(t, out, "Created study report for Alice Brown")
+	assertNotContains(t, out, "0 missing and 1 late assignment(s)")
+	assertNotContains(t, out, "2 assignment(s) currently marked redo")
+
+	reader, err := zip.OpenReader(output)
+	if err != nil {
+		t.Fatalf("open report zip: %v", err)
+	}
+	defer reader.Close()
+	var document string
+	for _, file := range reader.File {
+		if file.Name != "word/document.xml" {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatalf("open document.xml: %v", err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatalf("read document.xml: %v", err)
+		}
+		document = string(data)
+	}
+	assertNotContains(t, document, "finish redo assignments promptly")
+	assertNotContains(t, document, "submit work on time")
+	assertNotContains(t, document, "Other: Redo assignments")
+	assertContains(t, document, "Low test scores")
+	assertContains(t, document, "Work habits history: 1 late assignment(s) completed; 1 redo assignment(s) completed.")
 }
 
 func TestDashboardShowsHelpfulNextStepHints(t *testing.T) {

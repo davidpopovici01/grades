@@ -188,11 +188,11 @@ func (a *App) ShowGrades() error {
 	if ctx.AssignmentID == 0 || ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return errors.New("set year, term, course, and assignment first")
 	}
-	var title string
-	if err := a.db.QueryRow(`SELECT title FROM assignments WHERE assignment_id = ?`, ctx.AssignmentID).Scan(&title); err != nil {
+	meta, err := a.assignmentScoreMeta(ctx.AssignmentID)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintln(a.out, title)
+	fmt.Fprintln(a.out, meta.Title)
 	fmt.Fprintln(a.out)
 	if err := a.ensureDefaultGradesForCurrentAssignment(); err != nil {
 		return err
@@ -204,12 +204,38 @@ func (a *App) ShowGrades() error {
 	if scope != "" {
 		fmt.Fprintln(a.out, scope)
 	}
+	if len(records) > 0 {
+		rawTotal := 0.0
+		curvedTotal := 0.0
+		averageCount := 0
+		for _, record := range records {
+			if !countsTowardAssignmentAverage(record) {
+				continue
+			}
+			rawTotal += rawAssignmentPercent(record)
+			curvedTotal += assignmentCountsAsPercent(record, meta)
+			averageCount++
+		}
+		if averageCount > 0 {
+			fmt.Fprintf(a.out, "Uncurved average:\t%.1f%%\n", rawTotal/float64(averageCount))
+			fmt.Fprintf(a.out, "Curved average:\t\t%.1f%%\n\n", curvedTotal/float64(averageCount))
+		} else {
+			fmt.Fprintln(a.out, "Uncurved average:\t(none)")
+			fmt.Fprintln(a.out, "Curved average:\t\t(none)")
+			fmt.Fprintln(a.out)
+		}
+	}
 	nameWidth := 0
+	valueWidth := 0
 	for _, record := range records {
 		nameWidth = max(nameWidth, visibleWidth(record.Name))
+		valueWidth = max(valueWidth, visibleWidth(displayGrade(record)))
 	}
 	for _, record := range records {
-		fmt.Fprintf(a.out, "%s  %s\n", padVisibleRight(record.Name, nameWidth), displayGrade(record))
+		fmt.Fprintf(a.out, "%s  %s  counts as %s\n",
+			padVisibleRight(record.Name, nameWidth),
+			padVisibleRight(displayGrade(record), valueWidth),
+			assignmentCountsAsLabel(record, meta))
 	}
 	fmt.Fprintln(a.out)
 	fmt.Fprintln(a.out, "M = Missing")
@@ -403,15 +429,40 @@ type redoAssignment struct {
 	Record   GradeRecord
 }
 
+type makeupAssignment struct {
+	ID       int
+	Title    string
+	Category string
+	Record   GradeRecord
+}
+
+type assignmentDisplayMeta struct {
+	Title       string
+	MaxPoints   int
+	Anchor      float64
+	Lift        float64
+	PassPercent sql.NullFloat64
+}
+
 func (a *App) studentStatusGroups(students []Student) (map[int][]string, error) {
 	ctx := a.context()
 	rows, err := a.db.Query(`
-		SELECT DISTINCT students.student_pk, assignments.assignment_id, assignments.title, grades.score, COALESCE(grades.flags_bitmask, 0), assignments.max_points
+		SELECT DISTINCT students.student_pk,
+		       assignments.assignment_id,
+		       assignments.title,
+		       grades.score,
+		       COALESCE(grades.flags_bitmask, 0),
+		       assignments.max_points,
+		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent)
 		FROM assignments
 		JOIN section_enrollments ON section_enrollments.term_id = assignments.term_id
 		JOIN sections ON sections.section_id = section_enrollments.section_id
 		JOIN students ON students.student_pk = section_enrollments.student_pk
 		LEFT JOIN grades ON grades.assignment_id = assignments.assignment_id AND grades.student_pk = students.student_pk
+		LEFT JOIN category_grading_policies
+		  ON category_grading_policies.course_year_id = assignments.course_year_id
+		 AND category_grading_policies.term_id = assignments.term_id
+		 AND category_grading_policies.category_id = assignments.category_id
 		WHERE assignments.term_id = ? AND assignments.course_year_id = ? AND sections.course_year_id = assignments.course_year_id AND (? = 0 OR section_enrollments.section_id = ?)
 		ORDER BY students.last_name, students.first_name, assignments.title`, ctx.TermID, ctx.CourseYearID, ctx.SectionID, ctx.SectionID)
 	if err != nil {
@@ -423,18 +474,19 @@ func (a *App) studentStatusGroups(students []Student) (map[int][]string, error) 
 		var studentID, assignmentID, flags, maxPoints int
 		var title string
 		var score sql.NullFloat64
-		if err := rows.Scan(&studentID, &assignmentID, &title, &score, &flags, &maxPoints); err != nil {
+		var passPercent sql.NullFloat64
+		if err := rows.Scan(&studentID, &assignmentID, &title, &score, &flags, &maxPoints, &passPercent); err != nil {
 			return nil, err
 		}
 		_ = assignmentID
 		if _, ok := statuses[studentID]; !ok {
 			statuses[studentID] = &studentOverview{}
 		}
-		record := GradeRecord{Score: score, Flags: flags, MaxPoints: maxPoints}
+		record := GradeRecord{Score: score, Flags: flags, MaxPoints: maxPoints, PassPercent: passPercent}
 		switch {
 		case flags&flagMissing != 0:
 			statuses[studentID].Missing = append(statuses[studentID].Missing, title)
-		case hasActiveRedo(record, sql.NullFloat64{Float64: 80, Valid: true}):
+		case hasPendingRedo(record, passPercent):
 			statuses[studentID].Redo = append(statuses[studentID].Redo, title)
 		case flags&flagLate != 0 && !score.Valid:
 			statuses[studentID].Late = append(statuses[studentID].Late, title)
@@ -464,21 +516,30 @@ func (a *App) studentStatusGroups(students []Student) (map[int][]string, error) 
 	return result, nil
 }
 
-func hasActiveRedo(record GradeRecord, passPercent sql.NullFloat64) bool {
+func hasPendingRedo(record GradeRecord, passPercent sql.NullFloat64) bool {
 	if record.Flags&flagLocked0 != 0 {
+		return false
+	}
+	if !hasPassRate(passPercent) {
+		return false
+	}
+	if record.Flags&flagMissing != 0 {
+		return false
+	}
+	if record.Flags&flagPass != 0 {
+		return false
+	}
+	if record.Flags&flagRedo != 0 {
+		if !record.Score.Valid || record.MaxPoints <= 0 {
+			return true
+		}
+		return (record.Score.Float64/float64(record.MaxPoints))*100 < passPercent.Float64
+	}
+	if !record.Score.Valid || record.MaxPoints <= 0 {
 		return false
 	}
 	if record.Score.Valid && record.MaxPoints > 0 && passPercent.Valid && passPercent.Float64 > 0 &&
 		(record.Score.Float64/float64(record.MaxPoints))*100 < passPercent.Float64 {
-		return true
-	}
-	if record.Flags&flagRedo == 0 {
-		return false
-	}
-	if !record.Score.Valid {
-		return true
-	}
-	if record.MaxPoints <= 0 {
 		return true
 	}
 	return false
@@ -551,13 +612,17 @@ func (a *App) assignmentGradesForList() ([]GradeRecord, string, error) {
 		return nil, "", err
 	}
 	records := make([]GradeRecord, 0, len(students))
+	meta, err := a.assignmentScoreMeta(a.context().AssignmentID)
+	if err != nil {
+		return nil, "", err
+	}
 	for _, student := range students {
 		record, err := a.currentGrade(a.context().AssignmentID, student.ID)
 		if err != nil {
 			return nil, "", err
 		}
 		if record == nil {
-			record = &GradeRecord{StudentID: student.ID, Name: student.FirstName + " " + student.LastName}
+			record = &GradeRecord{StudentID: student.ID, Name: student.FirstName + " " + student.LastName, MaxPoints: meta.MaxPoints, PassPercent: meta.PassPercent}
 		}
 		records = append(records, *record)
 	}
@@ -715,12 +780,22 @@ func studentMatchesQuery(student Student, query string, tokens []string) bool {
 func (a *App) currentGrade(assignmentID, studentID int) (*GradeRecord, error) {
 	var record GradeRecord
 	err := a.db.QueryRow(`
-		SELECT grades.student_pk, students.first_name || ' ' || students.last_name, grades.score, grades.flags_bitmask, assignments.max_points, COALESCE(grades.redo_count, 0)
+		SELECT grades.student_pk,
+		       students.first_name || ' ' || students.last_name,
+		       grades.score,
+		       grades.flags_bitmask,
+		       assignments.max_points,
+		       COALESCE(grades.redo_count, 0),
+		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent)
 		FROM grades
 		JOIN students ON students.student_pk = grades.student_pk
 		JOIN assignments ON assignments.assignment_id = grades.assignment_id
+		LEFT JOIN category_grading_policies
+		  ON category_grading_policies.course_year_id = assignments.course_year_id
+		 AND category_grading_policies.term_id = assignments.term_id
+		 AND category_grading_policies.category_id = assignments.category_id
 		WHERE grades.assignment_id = ? AND grades.student_pk = ?`, assignmentID, studentID).
-		Scan(&record.StudentID, &record.Name, &record.Score, &record.Flags, &record.MaxPoints, &record.RedoCount)
+		Scan(&record.StudentID, &record.Name, &record.Score, &record.Flags, &record.MaxPoints, &record.RedoCount, &record.PassPercent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -731,10 +806,12 @@ func (a *App) currentGrade(assignmentID, studentID int) (*GradeRecord, error) {
 }
 
 func (a *App) saveGrade(assignmentID, studentID int, entry gradeEntry, prev *GradeRecord) error {
-	var maxPoints float64
-	if err := a.db.QueryRow(`SELECT max_points FROM assignments WHERE assignment_id = ?`, assignmentID).Scan(&maxPoints); err != nil {
+	meta, err := a.assignmentScoreMeta(assignmentID)
+	if err != nil {
 		return err
 	}
+	maxPoints := float64(meta.MaxPoints)
+	redoEligible := hasPassRate(meta.PassPercent)
 	score := sql.NullFloat64{}
 	if entry.Flags&flagPass != 0 {
 		score = sql.NullFloat64{Float64: maxPoints, Valid: true}
@@ -762,13 +839,17 @@ func (a *App) saveGrade(assignmentID, studentID int, entry gradeEntry, prev *Gra
 	if prev != nil && prev.Flags&flagLate != 0 && entry.Flags&flagLate == 0 {
 		entry.Flags |= flagLate
 	}
-	if prev != nil && prev.Flags&flagRedo != 0 && entry.Flags&flagRedo == 0 {
+	if redoEligible && prev != nil && prev.Flags&flagRedo != 0 && !entry.ClearRedo && entry.Flags&flagRedo == 0 {
 		entry.Flags |= flagRedo
 	}
-	if score.Valid && entry.Flags&(flagMissing|flagPass|flagLocked0) == 0 && maxPoints > 0 && score.Float64/maxPoints < 0.8 {
+	if !redoEligible {
+		entry.Flags &^= flagRedo
+	}
+	if redoEligible && score.Valid && entry.Flags&(flagMissing|flagPass|flagLocked0) == 0 && maxPoints > 0 &&
+		score.Float64/maxPoints < meta.PassPercent.Float64/100 {
 		entry.Flags |= flagRedo
 	}
-	_, err := a.db.Exec(`
+	_, err = a.db.Exec(`
 		INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(assignment_id, student_pk) DO UPDATE SET score = excluded.score, flags_bitmask = excluded.flags_bitmask, redo_count = excluded.redo_count, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
@@ -831,6 +912,21 @@ func (a *App) ListStudentRedo(studentID string) error {
 	return nil
 }
 
+func (a *App) ListStudentMakeup(studentID string) error {
+	student, assignments, scope, err := a.makeupAssignmentsForStudent(studentID)
+	if err != nil {
+		return err
+	}
+	if scope != "" {
+		fmt.Fprintln(a.out, scope)
+	}
+	fmt.Fprintf(a.out, "Make-up assignments for %s %s\n", student.FirstName, student.LastName)
+	for idx, assignment := range assignments {
+		fmt.Fprintf(a.out, "%d\t%s\t%s\t%s\n", idx+1, assignment.Title, assignment.Category, displayGradePlain(assignment.Record))
+	}
+	return nil
+}
+
 func (a *App) PassStudentRedo(studentID string) error {
 	student, assignments, scope, err := a.redoAssignmentsForStudent(studentID)
 	if err != nil {
@@ -840,19 +936,73 @@ func (a *App) PassStudentRedo(studentID string) error {
 		fmt.Fprintln(a.out, scope)
 	}
 
-	assignment := assignments[0]
-	if len(assignments) > 1 {
-		fmt.Fprintf(a.out, "Redo assignments for %s %s\n", student.FirstName, student.LastName)
-		for idx, item := range assignments {
-			fmt.Fprintf(a.out, "%d\t%s\t%s\t%s\n", idx+1, item.Title, item.Category, displayGradePlain(item.Record))
-		}
-		choice, err := a.promptRedoAssignmentChoice(len(assignments))
+	fmt.Fprintf(a.out, "Redo assignments for %s %s\n", student.FirstName, student.LastName)
+	for idx, item := range assignments {
+		fmt.Fprintf(a.out, "%d\t%s\t%s\t%s\n", idx+1, item.Title, item.Category, displayGradePlain(item.Record))
+	}
+	choice, err := a.promptRedoAssignmentChoice(len(assignments))
+	if err != nil {
+		return err
+	}
+	assignment := assignments[choice-1]
+
+	prev, err := a.currentGrade(assignment.ID, student.ID)
+	if err != nil {
+		return err
+	}
+	if err := a.saveGrade(assignment.ID, student.ID, gradeEntry{Flags: flagPass}, prev); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Recorded PASS for %s %s on %s\n", student.FirstName, student.LastName, assignment.Title)
+	return nil
+}
+
+func (a *App) EnterStudentMakeup(studentID string) error {
+	student, assignments, scope, err := a.makeupAssignmentsForStudent(studentID)
+	if err != nil {
+		return err
+	}
+	if scope != "" {
+		fmt.Fprintln(a.out, scope)
+	}
+	assignment, err := a.chooseMakeupAssignment(student, assignments)
+	if err != nil {
+		return err
+	}
+	for {
+		scoreRaw, err := a.prompt("Score")
 		if err != nil {
 			return err
 		}
-		assignment = assignments[choice-1]
+		entry, err := parseGradeInput(scoreRaw)
+		if err != nil {
+			fmt.Fprintln(a.out, retryMessage(err.Error()))
+			continue
+		}
+		prev, err := a.currentGrade(assignment.ID, student.ID)
+		if err != nil {
+			return err
+		}
+		if err := a.saveGrade(assignment.ID, student.ID, entry, prev); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.out, "Recorded %s for %s %s on %s\n", formatGradeValue(entry), student.FirstName, student.LastName, assignment.Title)
+		return nil
 	}
+}
 
+func (a *App) PassStudentMakeup(studentID string) error {
+	student, assignments, scope, err := a.makeupAssignmentsForStudent(studentID)
+	if err != nil {
+		return err
+	}
+	if scope != "" {
+		fmt.Fprintln(a.out, scope)
+	}
+	assignment, err := a.chooseMakeupAssignment(student, assignments)
+	if err != nil {
+		return err
+	}
 	prev, err := a.currentGrade(assignment.ID, student.ID)
 	if err != nil {
 		return err
@@ -975,7 +1125,7 @@ func (a *App) redoAssignmentsForStudent(studentID string) (Student, []redoAssign
 			return Student{}, nil, "", err
 		}
 		item.Record.PassPercent = passPercent
-		if hasActiveRedo(item.Record, passPercent) {
+		if hasPendingRedo(item.Record, passPercent) {
 			assignments = append(assignments, item)
 		}
 	}
@@ -986,6 +1136,89 @@ func (a *App) redoAssignmentsForStudent(studentID string) (Student, []redoAssign
 		return Student{}, nil, "", fmt.Errorf("%s %s has no active redo assignments", student.FirstName, student.LastName)
 	}
 	return student, assignments, scope, nil
+}
+
+func (a *App) makeupAssignmentsForStudent(studentID string) (Student, []makeupAssignment, string, error) {
+	ctx := a.context()
+	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return Student{}, nil, "", errors.New("set year, term, and course first")
+	}
+	if strings.TrimSpace(studentID) == "" {
+		var err error
+		studentID, err = a.prompt("Student")
+		if err != nil {
+			return Student{}, nil, "", err
+		}
+	}
+	student, err := a.resolveStudentReference(studentID)
+	if err != nil {
+		return Student{}, nil, "", err
+	}
+	scope := ""
+	if ctx.SectionID == 0 {
+		scope = "Using all sections in the current course."
+	}
+	rows, err := a.db.Query(`
+		SELECT assignments.assignment_id,
+		       assignments.title,
+		       categories.name,
+		       grades.score,
+		       COALESCE(grades.flags_bitmask, 0),
+		       assignments.max_points,
+		       COALESCE(grades.redo_count, 0),
+		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent, 80)
+		FROM assignments
+		JOIN categories ON categories.category_id = assignments.category_id
+		LEFT JOIN grades ON grades.assignment_id = assignments.assignment_id AND grades.student_pk = ?
+		LEFT JOIN category_grading_policies
+		  ON category_grading_policies.course_year_id = assignments.course_year_id
+		 AND category_grading_policies.term_id = assignments.term_id
+		 AND category_grading_policies.category_id = assignments.category_id
+		WHERE assignments.course_year_id = ? AND assignments.term_id = ?
+		ORDER BY assignments.assignment_id`, student.ID, ctx.CourseYearID, ctx.TermID)
+	if err != nil {
+		return Student{}, nil, "", err
+	}
+	defer rows.Close()
+
+	var assignments []makeupAssignment
+	for rows.Next() {
+		var item makeupAssignment
+		var passPercent sql.NullFloat64
+		if err := rows.Scan(&item.ID, &item.Title, &item.Category, &item.Record.Score, &item.Record.Flags, &item.Record.MaxPoints, &item.Record.RedoCount, &passPercent); err != nil {
+			return Student{}, nil, "", err
+		}
+		item.Record.PassPercent = passPercent
+		if needsMakeup(item.Record) {
+			assignments = append(assignments, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Student{}, nil, "", err
+	}
+	if len(assignments) == 0 {
+		return Student{}, nil, "", fmt.Errorf("%s %s has no active make-up assignments", student.FirstName, student.LastName)
+	}
+	return student, assignments, scope, nil
+}
+
+func needsMakeup(record GradeRecord) bool {
+	if record.Flags&flagMissing != 0 {
+		return true
+	}
+	return record.Flags&flagLate != 0 && !record.Score.Valid
+}
+
+func (a *App) chooseMakeupAssignment(student Student, assignments []makeupAssignment) (makeupAssignment, error) {
+	fmt.Fprintf(a.out, "Make-up assignments for %s %s\n", student.FirstName, student.LastName)
+	for idx, item := range assignments {
+		fmt.Fprintf(a.out, "%d\t%s\t%s\t%s\n", idx+1, item.Title, item.Category, displayGradePlain(item.Record))
+	}
+	choice, err := a.promptRedoAssignmentChoice(len(assignments))
+	if err != nil {
+		return makeupAssignment{}, err
+	}
+	return assignments[choice-1], nil
 }
 
 func (a *App) promptRedoAssignmentChoice(maxChoice int) (int, error) {
@@ -1150,9 +1383,6 @@ func displayGradePlain(record GradeRecord) string {
 	if record.Flags&flagLate != 0 {
 		value += "L"
 	}
-	if record.MaxPoints > 0 && record.Score.Float64/float64(record.MaxPoints) < 0.8 {
-		return value + " (redo)"
-	}
 	return value
 }
 
@@ -1210,9 +1440,6 @@ func displayGrade(record GradeRecord) string {
 	if record.Flags&flagLate != 0 {
 		value += "L"
 	}
-	if record.MaxPoints > 0 && record.Score.Float64/float64(record.MaxPoints) < 0.8 {
-		return colorRed(value + " (redo)")
-	}
 	return value
 }
 
@@ -1228,4 +1455,51 @@ func displayGradebookCell(record GradeRecord) string {
 		return colorGreen(base)
 	}
 	return base
+}
+
+func hasPassRate(passPercent sql.NullFloat64) bool {
+	return passPercent.Valid && passPercent.Float64 > 0
+}
+
+func assignmentCountsAsPercent(record GradeRecord, meta assignmentDisplayMeta) float64 {
+	record.MaxPoints = meta.MaxPoints
+	record.PassPercent = meta.PassPercent
+	if hasPassRate(meta.PassPercent) {
+		return completionPercent(record, meta.PassPercent, meta.Anchor, meta.Lift)
+	}
+	return recordPercent(record, meta.Anchor, meta.Lift)
+}
+
+func assignmentCountsAsLabel(record GradeRecord, meta assignmentDisplayMeta) string {
+	return fmt.Sprintf("%.1f%%", assignmentCountsAsPercent(record, meta))
+}
+
+func rawAssignmentPercent(record GradeRecord) float64 {
+	if !record.Score.Valid || record.MaxPoints <= 0 || record.Flags&flagMissing != 0 {
+		return 0
+	}
+	return (record.Score.Float64 / float64(record.MaxPoints)) * 100
+}
+
+func countsTowardAssignmentAverage(record GradeRecord) bool {
+	return record.Score.Valid && record.MaxPoints > 0 && record.Flags&(flagMissing|flagLate) == 0
+}
+
+func (a *App) assignmentScoreMeta(assignmentID int) (assignmentDisplayMeta, error) {
+	var meta assignmentDisplayMeta
+	err := a.db.QueryRow(`
+		SELECT assignments.title,
+		       assignments.max_points,
+		       COALESCE(assignment_curves.anchor_percent, 100),
+		       COALESCE(assignment_curves.lift_percent, 1),
+		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent)
+		FROM assignments
+		LEFT JOIN assignment_curves ON assignment_curves.assignment_id = assignments.assignment_id
+		LEFT JOIN category_grading_policies
+		  ON category_grading_policies.course_year_id = assignments.course_year_id
+		 AND category_grading_policies.term_id = assignments.term_id
+		 AND category_grading_policies.category_id = assignments.category_id
+		WHERE assignments.assignment_id = ?`, assignmentID).
+		Scan(&meta.Title, &meta.MaxPoints, &meta.Anchor, &meta.Lift, &meta.PassPercent)
+	return meta, err
 }

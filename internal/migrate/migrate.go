@@ -60,12 +60,26 @@ func Up(db *sql.DB) error {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	for _, m := range migrations {
-		var count int
-		if err := db.QueryRow(`SELECT COUNT(1) FROM schema_migrations WHERE version = ?`, m.version).Scan(&count); err != nil {
-			return fmt.Errorf("check schema_migrations for %s: %w", m.version, err)
+	rows, err := db.Query(`SELECT version FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("load schema_migrations: %w", err)
+	}
+	defer rows.Close()
+
+	applied := make(map[string]struct{}, len(migrations))
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return fmt.Errorf("scan schema_migrations: %w", err)
 		}
-		if count > 0 {
+		applied[version] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read schema_migrations: %w", err)
+	}
+
+	for _, m := range migrations {
+		if _, ok := applied[m.version]; ok {
 			continue
 		}
 		if err := apply(db, m); err != nil {

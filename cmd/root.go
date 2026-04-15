@@ -53,6 +53,7 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		newShowCmd(gradesApp),
 		newPassCmd(gradesApp),
 		newRedoCmd(gradesApp),
+		newMakeupCmd(gradesApp),
 		newFillCmd(gradesApp),
 		newMarkLateCmd(gradesApp),
 		newClearLateCmd(gradesApp),
@@ -61,6 +62,7 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		legacyHidden(newGradesCmd(gradesApp)),
 		newGradebookCmd(gradesApp),
 		newOverviewCmd(gradesApp),
+		newReportsCmd(gradesApp),
 		newStatsCmd(gradesApp),
 		newSystemCmd(gradesApp),
 		legacyHidden(newRepairCmd(gradesApp)),
@@ -73,6 +75,35 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 	)
 
 	return rootCmd
+}
+
+func newReportsCmd(a *app.App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reports",
+		Short: "Suggest and generate study reports",
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "suggest",
+		Args:  cobra.NoArgs,
+		Short: "Suggest students who may need a study report",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.SuggestStudyReports()
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "create <student> [file]",
+		Args:  cobra.RangeArgs(1, 2),
+		Short: "Create a filled study report for one student",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			output := ""
+			if len(args) == 2 {
+				output = args[1]
+			}
+			return a.CreateStudyReport(strings.Join(args[:1], " "), output)
+		},
+	})
+	return cmd
 }
 
 func legacyHidden(cmd *cobra.Command) *cobra.Command {
@@ -508,11 +539,11 @@ func newAssignmentsCmd(a *app.App) *cobra.Command {
 		},
 	})
 	curveCmd.AddCommand(&cobra.Command{
-		Use:   "set <anchor> <lift>",
-		Args:  cobra.ExactArgs(2),
+		Use:   "set <lift>",
+		Args:  cobra.ExactArgs(1),
 		Short: "Set the current assignment curve",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.SetAssignmentCurve(args[0], args[1])
+			return a.SetAssignmentCurve(args[0])
 		},
 	})
 	curveCmd.AddCommand(&cobra.Command{
@@ -539,6 +570,7 @@ func newGradesCmd(a *app.App) *cobra.Command {
 		newShowCmd(a),
 		newPassCmd(a),
 		newRedoCmd(a),
+		newMakeupCmd(a),
 		newFillCmd(a),
 		newMarkLateCmd(a),
 		newClearLateCmd(a),
@@ -612,6 +644,39 @@ func newRedoCmd(a *app.App) *cobra.Command {
 		Short: "Mark one redo assignment as pass for a student",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.PassStudentRedo(strings.Join(args, " "))
+		},
+	})
+	return cmd
+}
+
+func newMakeupCmd(a *app.App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "make-up",
+		Short: "List or record late/missing make-up work for a student without switching assignments",
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list <student>",
+		Args:  cobra.ArbitraryArgs,
+		Short: "List active late/missing make-up assignments for a student",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.ListStudentMakeup(strings.Join(args, " "))
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "enter <student>",
+		Args:  cobra.ArbitraryArgs,
+		Short: "Record a score for one late/missing make-up assignment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.EnterStudentMakeup(strings.Join(args, " "))
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "pass <student>",
+		Args:  cobra.ArbitraryArgs,
+		Short: "Mark one late/missing make-up assignment as pass",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.PassStudentMakeup(strings.Join(args, " "))
 		},
 	})
 	return cmd

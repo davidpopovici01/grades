@@ -106,7 +106,7 @@ Curve tools:
 
 ```powershell
 grades assignments curve show
-grades assignments curve set <anchor> <lift>
+grades assignments curve set <lift>
 grades assignments curve target <desired-average>
 ```
 

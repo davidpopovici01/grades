@@ -276,12 +276,14 @@ func (a *App) AssignmentCurve() (AssignmentCurve, error) {
 }
 
 func (a *App) assignmentCurveByID(assignmentID int) (AssignmentCurve, error) {
-	curve := AssignmentCurve{AssignmentID: assignmentID, AnchorPercent: 100, LiftPercent: 0}
+	curve := AssignmentCurve{AssignmentID: assignmentID, AnchorPercent: 100, LiftPercent: 1}
 	err := a.db.QueryRow(`SELECT assignment_id, anchor_percent, lift_percent FROM assignment_curves WHERE assignment_id = ?`, assignmentID).
 		Scan(&curve.AssignmentID, &curve.AnchorPercent, &curve.LiftPercent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return curve, nil
 	}
+	curve.AnchorPercent = 100
+	curve.LiftPercent = normalizeStoredLift(curve.LiftPercent)
 	return curve, err
 }
 
@@ -290,21 +292,16 @@ func (a *App) ShowAssignmentCurve() error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Curve anchor:\t%.1f\n", curve.AnchorPercent)
-	fmt.Fprintf(a.out, "Curve lift:\t%.1f\n", curve.LiftPercent)
+	fmt.Fprintf(a.out, "Curve lift:\t%.6f\n", curve.LiftPercent)
 	return nil
 }
 
-func (a *App) SetAssignmentCurve(anchorRaw, liftRaw string) error {
+func (a *App) SetAssignmentCurve(liftRaw string) error {
 	ctx := a.context()
 	if ctx.AssignmentID == 0 {
 		return errors.New("set an assignment first")
 	}
-	anchor, err := parsePositiveFloat(anchorRaw, "anchor")
-	if err != nil {
-		return err
-	}
-	lift, err := parseRangeFloat(liftRaw, "lift", 0, 100)
+	lift, err := parseRangeFloat(liftRaw, "lift", 0, 1)
 	if err != nil {
 		return err
 	}
@@ -312,10 +309,10 @@ func (a *App) SetAssignmentCurve(anchorRaw, liftRaw string) error {
 		INSERT INTO assignment_curves(assignment_id, anchor_percent, lift_percent)
 		VALUES (?, ?, ?)
 		ON CONFLICT(assignment_id) DO UPDATE SET anchor_percent = excluded.anchor_percent, lift_percent = excluded.lift_percent, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
-		ctx.AssignmentID, anchor, lift); err != nil {
+		ctx.AssignmentID, 100.0, lift); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Set assignment curve: anchor %.1f, lift %.1f\n", anchor, lift)
+	fmt.Fprintf(a.out, "Set assignment curve: lift %.6f\n", lift)
 	return nil
 }
 
@@ -331,10 +328,6 @@ func (a *App) TuneAssignmentCurve(targetRaw string) error {
 	if err != nil {
 		return err
 	}
-	curve, err := a.assignmentCurveByID(ctx.AssignmentID)
-	if err != nil {
-		return err
-	}
 	records, err := a.assignmentGradesForPopulation()
 	if err != nil {
 		return err
@@ -342,25 +335,36 @@ func (a *App) TuneAssignmentCurve(targetRaw string) error {
 	if len(records) == 0 {
 		return errors.New("no students found for curve tuning")
 	}
-	low, high := 0.0, 100.0
-	for i := 0; i < 40; i++ {
-		mid := (low + high) / 2
-		avg := averageCurvedPercent(records, curve.AnchorPercent, mid)
-		if avg < target {
-			low = mid
+	bestAnchor := 100.0
+	lowLift, highLift := 0.0, 1.0
+	lowAvg := averageCurvedPercent(records, bestAnchor, lowLift)
+	highAvg := averageCurvedPercent(records, bestAnchor, highLift)
+	if target > lowAvg+0.0001 || target < highAvg-0.0001 {
+		return fmt.Errorf("target average %.4f is unreachable with lift-only curve; reachable range is %.4f to %.4f", target, highAvg, lowAvg)
+	}
+	for i := 0; i < 80; i++ {
+		mid := (lowLift + highLift) / 2
+		avg := averageCurvedPercent(records, bestAnchor, mid)
+		if avg > target {
+			lowLift = mid
 		} else {
-			high = mid
+			highLift = mid
 		}
 	}
-	lift := math.Round(high*10) / 10
+	bestLift := math.Round(highLift*1000000) / 1000000
+	bestAvg := averageCurvedPercent(records, bestAnchor, bestLift)
+	bestGap := math.Abs(bestAvg - target)
+	if bestGap > 0.0001 {
+		return fmt.Errorf("target average %.4f is unreachable with lift-only curve; closest is lift %.6f, average %.4f%%", target, bestLift, bestAvg)
+	}
 	if _, err := a.db.Exec(`
 		INSERT INTO assignment_curves(assignment_id, anchor_percent, lift_percent)
 		VALUES (?, ?, ?)
 		ON CONFLICT(assignment_id) DO UPDATE SET anchor_percent = excluded.anchor_percent, lift_percent = excluded.lift_percent, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
-		ctx.AssignmentID, curve.AnchorPercent, lift); err != nil {
+		ctx.AssignmentID, bestAnchor, bestLift); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Set assignment curve target %.1f with anchor %.1f and lift %.1f\n", target, curve.AnchorPercent, lift)
+	fmt.Fprintf(a.out, "Set assignment curve target %.1f with lift %.6f (average %.4f%%)\n", target, bestLift, bestAvg)
 	return nil
 }
 
@@ -394,20 +398,34 @@ func curvedPercent(rawPercent, anchorPercent, liftPercent float64) float64 {
 	if rawPercent <= 0 {
 		return 0
 	}
-	rawExponent := (100 - liftPercent) / 100
-	anchorExponent := liftPercent / 100
-	return math.Pow(rawPercent, rawExponent) * math.Pow(anchorPercent, anchorExponent)
+	return math.Pow(rawPercent, liftPercent) * math.Pow(100, 1-liftPercent)
+}
+
+func normalizeStoredLift(lift float64) float64 {
+	switch {
+	case lift == 0:
+		return 1
+	case lift > 1:
+		return lift / 100
+	default:
+		return lift
+	}
 }
 
 func averageCurvedPercent(records []GradeRecord, anchor, lift float64) float64 {
-	if len(records) == 0 {
+	total := 0.0
+	count := 0
+	for _, record := range records {
+		if !countsTowardAssignmentAverage(record) {
+			continue
+		}
+		total += recordPercent(record, anchor, lift)
+		count++
+	}
+	if count == 0 {
 		return 0
 	}
-	total := 0.0
-	for _, record := range records {
-		total += recordPercent(record, anchor, lift)
-	}
-	return total / float64(len(records))
+	return total / float64(count)
 }
 
 func recordPercent(record GradeRecord, anchor, lift float64) float64 {
@@ -490,7 +508,7 @@ func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) 
 		       assignments.category_id,
 		       assignments.max_points,
 		       COALESCE(assignment_curves.anchor_percent, 100),
-		       COALESCE(assignment_curves.lift_percent, 0),
+		       COALESCE(assignment_curves.lift_percent, 1),
 		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent)
 		FROM assignments
 		LEFT JOIN assignment_curves ON assignment_curves.assignment_id = assignments.assignment_id

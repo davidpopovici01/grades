@@ -240,7 +240,7 @@ grades assignments show
 grades assignments max 20
 grades assignments pass-rate 80
 grades assignments curve show
-grades assignments curve set 100 5
+grades assignments curve set 0.59
 grades assignments curve target 85
 ```
 

@@ -522,6 +522,8 @@ func (a *App) assignmentExportRows(assignmentID, termID, courseYearID int) ([]as
 		       grades.score,
 		       COALESCE(grades.flags_bitmask, 0),
 		       assignments.max_points,
+		       COALESCE(assignment_curves.anchor_percent, 100),
+		       COALESCE(assignment_curves.lift_percent, 1),
 		       COALESCE(category_grading_policies.scheme_key, 'average'),
 		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent)
 		FROM section_enrollments
@@ -529,6 +531,7 @@ func (a *App) assignmentExportRows(assignmentID, termID, courseYearID int) ([]as
 		JOIN students ON students.student_pk = section_enrollments.student_pk
 		JOIN assignments ON assignments.assignment_id = ?
 		LEFT JOIN grades ON grades.assignment_id = ? AND grades.student_pk = students.student_pk
+		LEFT JOIN assignment_curves ON assignment_curves.assignment_id = assignments.assignment_id
 		LEFT JOIN category_grading_policies
 		  ON category_grading_policies.course_year_id = assignments.course_year_id
 		 AND category_grading_policies.term_id = assignments.term_id
@@ -547,9 +550,10 @@ func (a *App) assignmentExportRows(assignmentID, termID, courseYearID int) ([]as
 		var score sql.NullFloat64
 		var passPercent sql.NullFloat64
 		var maxPoints int
+		var anchor, lift float64
 		var schemeKey string
 		var flags int
-		if err := rows.Scan(&studentID, &powerSchoolNum, &lastName, &chineseName, &firstName, &status, &score, &flags, &maxPoints, &schemeKey, &passPercent); err != nil {
+		if err := rows.Scan(&studentID, &powerSchoolNum, &lastName, &chineseName, &firstName, &status, &score, &flags, &maxPoints, &anchor, &lift, &schemeKey, &passPercent); err != nil {
 			return nil, err
 		}
 		_ = studentID
@@ -557,7 +561,7 @@ func (a *App) assignmentExportRows(assignmentID, termID, courseYearID int) ([]as
 		out = append(out, assignmentExportRow{
 			PowerSchoolNum: powerSchoolNum,
 			StudentName:    formatPowerSchoolExportName(lastName, chineseName, firstName),
-			Score:          powerschoolExportScore(record, schemeKey, status),
+			Score:          powerschoolExportScore(record, schemeKey, status, anchor, normalizeStoredLift(lift)),
 		})
 	}
 	return out, rows.Err()
@@ -568,22 +572,15 @@ func formatPowerSchoolExportName(lastName, chineseName, firstName string) string
 	return fmt.Sprintf("%s, %s", lastName, right)
 }
 
-func powerschoolExportScore(record GradeRecord, schemeKey, status string) string {
+func powerschoolExportScore(record GradeRecord, schemeKey, status string, anchor, lift float64) string {
 	if !strings.EqualFold(status, "active") {
 		return ""
 	}
 	if schemeKey == "completion" {
-		effective := completionPercent(record, record.PassPercent, 100, 0)
+		effective := completionPercent(record, record.PassPercent, anchor, lift)
 		return strconv.FormatFloat(effective, 'f', 2, 64)
 	}
-	if record.Flags&flagMissing != 0 || !record.Score.Valid {
-		return "0.00"
-	}
-	if record.MaxPoints <= 0 {
-		return "0.00"
-	}
-	scaled := (record.Score.Float64 / float64(record.MaxPoints)) * 100
-	return strconv.FormatFloat(scaled, 'f', 2, 64)
+	return strconv.FormatFloat(recordPercent(record, anchor, lift), 'f', 2, 64)
 }
 
 func (a *App) pendingAssignmentsForExport(termID, courseYearID int) ([]pendingAssignmentExport, error) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/davidpopovici01/grades/internal/db"
 	"github.com/davidpopovici01/grades/internal/migrate"
@@ -35,6 +36,9 @@ type Context struct {
 }
 
 func New(in io.Reader, out, errOut io.Writer) (*App, error) {
+	trace := newStartupTrace(errOut)
+	defer trace.finish()
+
 	homeDir := os.Getenv("GRADES_HOME")
 	if homeDir == "" {
 		userHome, err := os.UserHomeDir()
@@ -46,6 +50,7 @@ func New(in io.Reader, out, errOut io.Writer) (*App, error) {
 	if err := os.MkdirAll(homeDir, 0o755); err != nil {
 		return nil, err
 	}
+	trace.mark("mkdir home")
 
 	configPath := filepath.Join(homeDir, "config.yaml")
 	v := viper.New()
@@ -64,6 +69,7 @@ func New(in io.Reader, out, errOut io.Writer) (*App, error) {
 	if err := v.ReadInConfig(); err != nil {
 		return nil, err
 	}
+	trace.mark("load config")
 
 	dbPath := os.Getenv("GRADES_DB_PATH")
 	if dbPath == "" {
@@ -73,10 +79,12 @@ func New(in io.Reader, out, errOut io.Writer) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	trace.mark("open db")
 	if err := migrate.Up(conn); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
+	trace.mark("migrate")
 
 	return &App{
 		db:         conn,
@@ -88,6 +96,50 @@ func New(in io.Reader, out, errOut io.Writer) (*App, error) {
 		out:        out,
 		errOut:     errOut,
 	}, nil
+}
+
+type startupTrace struct {
+	out     io.Writer
+	enabled bool
+	started time.Time
+	last    time.Time
+	steps   []string
+}
+
+func newStartupTrace(out io.Writer) *startupTrace {
+	now := time.Now()
+	return &startupTrace{
+		out:     out,
+		enabled: os.Getenv("GRADES_STARTUP_TRACE") == "1",
+		started: now,
+		last:    now,
+	}
+}
+
+func (t *startupTrace) mark(label string) {
+	if t == nil {
+		return
+	}
+	now := time.Now()
+	t.steps = append(t.steps, fmt.Sprintf("%s: %s", label, now.Sub(t.last).Round(time.Millisecond)))
+	t.last = now
+}
+
+func (t *startupTrace) finish() {
+	if t == nil || t.out == nil {
+		return
+	}
+	total := time.Since(t.started).Round(time.Millisecond)
+	if t.enabled {
+		for _, step := range t.steps {
+			fmt.Fprintf(t.out, "startup %s\n", step)
+		}
+		fmt.Fprintf(t.out, "startup total: %s\n", total)
+		return
+	}
+	if total >= 5*time.Second {
+		fmt.Fprintf(t.out, "startup total: %s (set GRADES_STARTUP_TRACE=1 for breakdown)\n", total)
+	}
 }
 
 func (a *App) Close() error {

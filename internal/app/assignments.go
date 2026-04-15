@@ -159,7 +159,7 @@ func (a *App) ShowAssignment(idRaw string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Curve:\tanchor %.1f, lift %.1f\n", curve.AnchorPercent, curve.LiftPercent)
+	fmt.Fprintf(a.out, "Curve:\tlift %.6f\n", curve.LiftPercent)
 	return nil
 }
 
