@@ -597,18 +597,29 @@ func calculateCategoryScore(rule CategoryRule, assignments []AssignmentScoreMeta
 	switch rule.SchemeKey {
 	case "completion":
 		total := 0.0
+		count := 0
 		for _, assignment := range assignments {
 			record := grades[assignment.ID]
 			record.MaxPoints = assignment.MaxPoints
+			if !countsTowardAssignmentAverage(record) {
+				continue
+			}
 			total += completionPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift)
+			count++
 		}
-		return total / float64(len(assignments)), true
+		if count == 0 {
+			return 0, false
+		}
+		return total / float64(count), true
 	case "total-points":
 		sum := 0.0
 		maxTotal := 0.0
 		for _, assignment := range assignments {
 			record := grades[assignment.ID]
 			record.MaxPoints = assignment.MaxPoints
+			if !countsTowardAssignmentAverage(record) {
+				continue
+			}
 			maxTotal += float64(assignment.MaxPoints)
 			sum += (recordPercent(record, assignment.Anchor, assignment.Lift) / 100) * float64(assignment.MaxPoints)
 		}
@@ -618,12 +629,20 @@ func calculateCategoryScore(rule CategoryRule, assignments []AssignmentScoreMeta
 		return (sum / maxTotal) * 100, true
 	default:
 		total := 0.0
+		count := 0
 		for _, assignment := range assignments {
 			record := grades[assignment.ID]
 			record.MaxPoints = assignment.MaxPoints
+			if !countsTowardAssignmentAverage(record) {
+				continue
+			}
 			total += recordPercent(record, assignment.Anchor, assignment.Lift)
+			count++
 		}
-		return total / float64(len(assignments)), true
+		if count == 0 {
+			return 0, false
+		}
+		return total / float64(count), true
 	}
 }
 

@@ -130,10 +130,19 @@ grades clear-cheat [student]
 ```powershell
 grades gradebook
 grades overview
+grades overview --after <assignment-id>
+grades overview --set-after <assignment-id>
+grades overview --clear-after
 grades stats assignment
 grades stats section
 grades stats student <student-id>
 ```
+
+Overview cutoff:
+
+- `grades overview --after <id>` — one-time override, only checks assignments with ID greater than `<id>`
+- `grades overview --set-after <id>` — persist the cutoff for the current course and term
+- `grades overview --clear-after` — remove the persisted cutoff
 
 ## Import
 

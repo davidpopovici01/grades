@@ -23,6 +23,12 @@ func (a *App) PrintDashboard() error {
 	fmt.Fprintf(a.out, "  Course:\t%s\n", fallback(courseName))
 	fmt.Fprintf(a.out, "  Section:\t%s\n", fallback(sectionName))
 	fmt.Fprintf(a.out, "  Assignment:\t%s\n", fallback(assignmentName))
+	if ctx.CourseYearID != 0 && ctx.TermID != 0 {
+		cutoff, _ := a.OverviewCutoff()
+		if cutoff > 0 {
+			fmt.Fprintf(a.out, "  Overview cutoff:\tassignment %d\n", cutoff)
+		}
+	}
 	fmt.Fprintln(a.out)
 	fmt.Fprintln(a.out, "Next steps")
 	fmt.Fprintln(a.out, "  - grades setup to add a new course")

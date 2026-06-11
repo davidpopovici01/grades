@@ -63,6 +63,7 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		newGradebookCmd(gradesApp),
 		newOverviewCmd(gradesApp),
 		newReportsCmd(gradesApp),
+		newExcelReportCmd(gradesApp),
 		newStatsCmd(gradesApp),
 		newSystemCmd(gradesApp),
 		legacyHidden(newRepairCmd(gradesApp)),
@@ -75,6 +76,28 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 	)
 
 	return rootCmd
+}
+
+func newExcelReportCmd(a *app.App) *cobra.Command {
+	opts := app.ExcelReportOptions{}
+	cmd := &cobra.Command{
+		Use:   "excel-report [workbook]",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Fill the Senior 2 APCSA Excel report and create a printable copy",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				opts.Workbook = args[0]
+			}
+			return a.ExcelReport(opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Workbook, "workbook", "", "Excel workbook to update")
+	cmd.Flags().StringVar(&opts.Sheet, "sheet", "Senior2", "worksheet name to update")
+	cmd.Flags().StringVar(&opts.Teacher, "teacher", "David P.", "teacher header used to find the subject block")
+	cmd.Flags().StringVar(&opts.ExamCategory, "exam-category", "Midterm", "category to use for the exam grade")
+	cmd.Flags().StringVar(&opts.Printable, "printable", "", "printable workbook output path")
+	cmd.Flags().BoolVar(&opts.SkipCScores, "skip-c-scores", false, "fill generated grades without prompting for C scores")
+	return cmd
 }
 
 func newReportsCmd(a *app.App) *cobra.Command {
@@ -523,7 +546,10 @@ func newAssignmentsCmd(a *app.App) *cobra.Command {
 			if err := a.ExportGrades(file); err != nil {
 				return err
 			}
-			return a.PublishStudentPortal("")
+			if err := a.PublishStudentPortal(""); err != nil {
+				return err
+			}
+			return a.DeployStudentPortal(false)
 		},
 	})
 	curveCmd := &cobra.Command{
@@ -763,14 +789,35 @@ func newGradebookCmd(a *app.App) *cobra.Command {
 }
 
 func newOverviewCmd(a *app.App) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "overview",
 		Args:  cobra.NoArgs,
 		Short: "Show status overview for the current section or course",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.ShowOverview()
+			setAfter, _ := cmd.Flags().GetInt("set-after")
+			if setAfter > 0 {
+				return a.SetOverviewCutoff(setAfter)
+			}
+			clearAfter, _ := cmd.Flags().GetBool("clear-after")
+			if clearAfter {
+				return a.ClearOverviewCutoff()
+			}
+			after, _ := cmd.Flags().GetInt("after")
+			cutoff := after
+			if cutoff <= 0 {
+				stored, err := a.OverviewCutoff()
+				if err != nil {
+					return err
+				}
+				cutoff = stored
+			}
+			return a.ShowOverview(cutoff)
 		},
 	}
+	cmd.Flags().Int("after", 0, "Only check assignments with ID greater than this value (one-time override)")
+	cmd.Flags().Int("set-after", 0, "Persist an assignment ID cutoff for the current course and term")
+	cmd.Flags().Bool("clear-after", false, "Clear the persisted assignment ID cutoff")
+	return cmd
 }
 
 func newStatsCmd(a *app.App) *cobra.Command {
@@ -886,7 +933,10 @@ func newExportCmd(a *app.App) *cobra.Command {
 			if err := a.ExportPendingAssignments(); err != nil {
 				return err
 			}
-			return a.PublishStudentPortal("")
+			if err := a.PublishStudentPortal(""); err != nil {
+				return err
+			}
+			return a.DeployStudentPortal(false)
 		},
 	}
 	cmd.AddCommand(&cobra.Command{
@@ -943,12 +993,30 @@ func newWebCmd(a *app.App) *cobra.Command {
 			return a.ServeStudentPortal(addr, dir)
 		},
 	})
+	deployCmd := &cobra.Command{
+		Use:   "deploy",
+		Args:  cobra.NoArgs,
+		Short: "Publish and deploy portal data to the remote server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			verbose, _ := cmd.Flags().GetBool("verbose")
+			skipPublish, _ := cmd.Flags().GetBool("no-publish")
+			if !skipPublish {
+				if err := a.PublishStudentPortal(""); err != nil {
+					return err
+				}
+			}
+			return a.DeployStudentPortal(verbose)
+		},
+	}
+	deployCmd.Flags().BoolP("verbose", "v", false, "show detailed scp output")
+	deployCmd.Flags().Bool("no-publish", false, "skip publishing, deploy existing data only")
+	cmd.AddCommand(deployCmd)
 	accounts := &cobra.Command{
 		Use:   "accounts",
 		Short: "Manage student portal accounts",
 		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	accounts.AddCommand(&cobra.Command{
+	initCmd := &cobra.Command{
 		Use:   "init [default-password]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Create portal accounts for students in the current course and term",
@@ -957,19 +1025,34 @@ func newWebCmd(a *app.App) *cobra.Command {
 			if len(args) == 1 {
 				password = args[0]
 			}
-			return a.InitStudentPortalAccounts(password)
+			memorable, _ := cmd.Flags().GetBool("memorable")
+			return a.InitStudentPortalAccounts(password, memorable)
+		},
+	}
+	initCmd.Flags().BoolP("memorable", "m", false, "generate memorable 3-word passwords")
+	accounts.AddCommand(initCmd)
+
+	accounts.AddCommand(&cobra.Command{
+		Use:   "list",
+		Args:  cobra.NoArgs,
+		Short: "List all student portal accounts for the current course and term",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.ListStudentPortalAccounts()
 		},
 	})
+
 	resetCmd := &cobra.Command{
 		Use:   "reset <student>",
 		Args:  cobra.MinimumNArgs(1),
 		Short: "Reset a student's portal password",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			password, _ := cmd.Flags().GetString("password")
-			return a.ResetStudentPortalPassword(strings.Join(args, " "), password)
+			memorable, _ := cmd.Flags().GetBool("memorable")
+			return a.ResetStudentPortalPassword(strings.Join(args, " "), password, memorable)
 		},
 	}
 	resetCmd.Flags().StringP("password", "p", "", "temporary password to set")
+	resetCmd.Flags().BoolP("memorable", "m", false, "generate a memorable 3-word password")
 	accounts.AddCommand(resetCmd)
 	cmd.AddCommand(accounts)
 	return cmd

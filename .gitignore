@@ -53,3 +53,30 @@ grades-test-size.exe
 dist/
 .tmp-study-report.docx
 study-reports/
+excel-reports/
+data/
+test-data/
+passwords.txt
+*.bak
+
+# Grade templates and data files
+*.xls
+*.xlsx
+
+# Generated reports
+By Mr Popovici.docx
+By Mr Popovici.pdf
+
+# Local-only scripts
+restart-portal.txt
+
+# Secrets
+.jwt-secret*
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Node.js
+node_modules/

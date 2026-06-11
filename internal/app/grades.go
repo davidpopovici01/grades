@@ -383,7 +383,62 @@ func renderGradebookChunk(out io.Writer, assignments []Assignment, grid []Gradeb
 	}
 }
 
-func (a *App) ShowOverview() error {
+func (a *App) OverviewCutoff() (int, error) {
+	ctx := a.context()
+	if ctx.CourseYearID == 0 || ctx.TermID == 0 {
+		return 0, nil
+	}
+	var cutoff sql.NullInt64
+	err := a.db.QueryRow(`
+		SELECT overview_cutoff_assignment_id
+		FROM course_year_terms
+		WHERE course_year_id = ? AND term_id = ?`, ctx.CourseYearID, ctx.TermID).Scan(&cutoff)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if cutoff.Valid {
+		return int(cutoff.Int64), nil
+	}
+	return 0, nil
+}
+
+func (a *App) SetOverviewCutoff(assignmentID int) error {
+	ctx := a.context()
+	if ctx.CourseYearID == 0 || ctx.TermID == 0 {
+		return errors.New("set year, term, and course first")
+	}
+	_, err := a.db.Exec(`
+		INSERT INTO course_year_terms(course_year_id, term_id, overview_cutoff_assignment_id)
+		VALUES (?, ?, ?)
+		ON CONFLICT(course_year_id, term_id) DO UPDATE SET overview_cutoff_assignment_id = excluded.overview_cutoff_assignment_id`,
+		ctx.CourseYearID, ctx.TermID, assignmentID)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Set overview cutoff to assignment %d for this course and term.\n", assignmentID)
+	return nil
+}
+
+func (a *App) ClearOverviewCutoff() error {
+	ctx := a.context()
+	if ctx.CourseYearID == 0 || ctx.TermID == 0 {
+		return errors.New("set year, term, and course first")
+	}
+	_, err := a.db.Exec(`
+		UPDATE course_year_terms
+		SET overview_cutoff_assignment_id = NULL
+		WHERE course_year_id = ? AND term_id = ?`, ctx.CourseYearID, ctx.TermID)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.out, "Cleared overview cutoff for this course and term.")
+	return nil
+}
+
+func (a *App) ShowOverview(cutoff int) error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return errors.New("set year, term, and course first")
@@ -396,7 +451,7 @@ func (a *App) ShowOverview() error {
 		fmt.Fprintln(a.out, "No students found.")
 		return nil
 	}
-	statuses, err := a.studentStatusGroups(students)
+	statuses, err := a.studentStatusGroups(students, cutoff)
 	if err != nil {
 		return err
 	}
@@ -444,9 +499,9 @@ type assignmentDisplayMeta struct {
 	PassPercent sql.NullFloat64
 }
 
-func (a *App) studentStatusGroups(students []Student) (map[int][]string, error) {
+func (a *App) studentStatusGroups(students []Student, cutoff int) (map[int][]string, error) {
 	ctx := a.context()
-	rows, err := a.db.Query(`
+	query := `
 		SELECT DISTINCT students.student_pk,
 		       assignments.assignment_id,
 		       assignments.title,
@@ -463,8 +518,14 @@ func (a *App) studentStatusGroups(students []Student) (map[int][]string, error) 
 		  ON category_grading_policies.course_year_id = assignments.course_year_id
 		 AND category_grading_policies.term_id = assignments.term_id
 		 AND category_grading_policies.category_id = assignments.category_id
-		WHERE assignments.term_id = ? AND assignments.course_year_id = ? AND sections.course_year_id = assignments.course_year_id AND (? = 0 OR section_enrollments.section_id = ?)
-		ORDER BY students.last_name, students.first_name, assignments.title`, ctx.TermID, ctx.CourseYearID, ctx.SectionID, ctx.SectionID)
+		WHERE assignments.term_id = ? AND assignments.course_year_id = ? AND sections.course_year_id = assignments.course_year_id AND (? = 0 OR section_enrollments.section_id = ?)`
+	args := []any{ctx.TermID, ctx.CourseYearID, ctx.SectionID, ctx.SectionID}
+	if cutoff > 0 {
+		query += ` AND assignments.assignment_id > ?`
+		args = append(args, cutoff)
+	}
+	query += ` ORDER BY students.last_name, students.first_name, assignments.title`
+	rows, err := a.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1482,7 +1543,7 @@ func rawAssignmentPercent(record GradeRecord) float64 {
 }
 
 func countsTowardAssignmentAverage(record GradeRecord) bool {
-	return record.Score.Valid && record.MaxPoints > 0 && record.Flags&(flagMissing|flagLate) == 0
+	return record.MaxPoints > 0 && (record.Score.Valid || record.Flags != 0)
 }
 
 func (a *App) assignmentScoreMeta(assignmentID int) (assignmentDisplayMeta, error) {

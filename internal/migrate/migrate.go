@@ -34,6 +34,9 @@ var submissionsSQL string
 //go:embed sql/009_submission_kind.sql
 var submissionKindSQL string
 
+//go:embed sql/010_overview_cutoff.sql
+var overviewCutoffSQL string
+
 type migration struct {
 	version string
 	sql     string
@@ -49,6 +52,7 @@ var migrations = []migration{
 	{version: "007_student_portal", sql: studentPortalSQL},
 	{version: "008_submissions", sql: submissionsSQL},
 	{version: "009_submission_kind", sql: submissionKindSQL},
+	{version: "010_overview_cutoff", sql: overviewCutoffSQL},
 }
 
 func Up(db *sql.DB) error {

@@ -158,6 +158,8 @@ Current behavior:
 - `Redo` shows for below-threshold / active redo work
 - otherwise the work is treated as OK in overview
 
+You can set an assignment cutoff so older assignments are ignored. See `grades overview --set-after` and `grades overview --clear-after`.
+
 ### grades gradebook
 
 Shows the broader table view across assignments.

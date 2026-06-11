@@ -61,6 +61,9 @@ func New(in io.Reader, out, errOut io.Writer) (*App, error) {
 	v.SetDefault("context.course_year_id", 0)
 	v.SetDefault("context.section_id", 0)
 	v.SetDefault("context.assignment_id", 0)
+	v.SetDefault("portal.server", "")
+	v.SetDefault("portal.key", "")
+	v.SetDefault("portal.remote_dir", "~/portal")
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 		if err := v.WriteConfigAs(configPath); err != nil {
 			return nil, err

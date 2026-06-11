@@ -217,6 +217,9 @@ grades clear-cheat Noah
 grades show
 grades gradebook
 grades overview
+grades overview --after 12
+grades overview --set-after 12
+grades overview --clear-after
 grades students show Noah
 grades categories totals
 ```

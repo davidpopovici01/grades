@@ -360,7 +360,10 @@ func averagePercentStrings(values map[int]string) float64 {
 	return total / float64(count)
 }
 
+// americanLetterGrade is kept for backward compatibility.
+// Prefer portalauth.AmericanLetterGrade for new code.
 func americanLetterGrade(percent float64) string {
+	// Inline copy to avoid import cycle (reports.go imports app types, not portalauth).
 	switch {
 	case percent >= 93:
 		return "A"

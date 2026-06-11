@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ func TestNewWritesStartupTraceWhenEnabled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GRADES_HOME", home)
 	t.Setenv("GRADES_DB_PATH", filepath.Join(home, "grades.db"))
+	t.Setenv("GRADES_NO_OPEN", "1")
 	t.Setenv("GRADES_STARTUP_TRACE", "1")
 
 	var stdout bytes.Buffer
@@ -49,5 +51,63 @@ func TestSlowStartupHintDisabledByDefault(t *testing.T) {
 	trace.finish()
 	if !strings.Contains(buf.String(), "set GRADES_STARTUP_TRACE=1 for breakdown") {
 		t.Fatalf("expected slow-start hint, got %q", buf.String())
+	}
+}
+
+func TestCalculateCategoryScoreCountsMissingLateAndExplicitZero(t *testing.T) {
+	rule := CategoryRule{SchemeKey: "average"}
+	assignments := []AssignmentScoreMeta{
+		{ID: 1, MaxPoints: 10, Anchor: 100, Lift: 1},
+		{ID: 2, MaxPoints: 10, Anchor: 100, Lift: 1},
+		{ID: 3, MaxPoints: 10, Anchor: 100, Lift: 1},
+		{ID: 4, MaxPoints: 10, Anchor: 100, Lift: 1},
+	}
+	grades := map[int]GradeRecord{
+		1: {Score: sql.NullFloat64{Float64: 8, Valid: true}},
+		2: {Score: sql.NullFloat64{Float64: 0, Valid: true}},
+		3: {Flags: flagMissing},
+		4: {Flags: flagLate},
+	}
+
+	score, ok := calculateCategoryScore(rule, assignments, grades)
+	if !ok {
+		t.Fatalf("expected category score to be included")
+	}
+	if score != 20 {
+		t.Fatalf("expected average to include explicit zero, missing, and late as counted zeroes, got %v", score)
+	}
+}
+
+func TestPortalCategoryScoreCountsMissingLateAndExplicitZero(t *testing.T) {
+	rule := CategoryRule{SchemeKey: "average"}
+	items := []portalAssignmentDetail{
+		{studentAssignmentDetail: studentAssignmentDetail{
+			Grade:  GradeRecord{Score: sql.NullFloat64{Float64: 8, Valid: true}, MaxPoints: 10},
+			Anchor: 100,
+			Lift:   1,
+		}},
+		{studentAssignmentDetail: studentAssignmentDetail{
+			Grade:  GradeRecord{Score: sql.NullFloat64{Float64: 0, Valid: true}, MaxPoints: 10},
+			Anchor: 100,
+			Lift:   1,
+		}},
+		{studentAssignmentDetail: studentAssignmentDetail{
+			Grade:  GradeRecord{Flags: flagMissing, MaxPoints: 10},
+			Anchor: 100,
+			Lift:   1,
+		}},
+		{studentAssignmentDetail: studentAssignmentDetail{
+			Grade:  GradeRecord{Flags: flagLate, MaxPoints: 10},
+			Anchor: 100,
+			Lift:   1,
+		}},
+	}
+
+	score, ok := portalCategoryScore(rule, items)
+	if !ok {
+		t.Fatalf("expected portal category score to be included")
+	}
+	if score != 20 {
+		t.Fatalf("expected portal average to include explicit zero, missing, and late as counted zeroes, got %v", score)
 	}
 }

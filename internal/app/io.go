@@ -1104,6 +1104,9 @@ func (a *App) courseYearTermIDs(courseYearID int) ([]int, error) {
 }
 
 func openFile(path string) error {
+	if os.Getenv("GRADES_NO_OPEN") == "1" {
+		return nil
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":

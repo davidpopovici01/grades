@@ -144,6 +144,28 @@ grades overview
 grades categories totals
 ```
 
+### Mid-Semester Cutoff
+
+If you want `grades overview` to ignore older assignments (for example, after a midterm):
+
+```powershell
+grades overview --set-after 12
+```
+
+This persists the cutoff for the current course and term. From then on, `grades overview` only checks assignments with an ID greater than `12`.
+
+To clear it later:
+
+```powershell
+grades overview --clear-after
+```
+
+To override the persisted cutoff for a single run:
+
+```powershell
+grades overview --after 15
+```
+
 Student detail:
 
 ```powershell

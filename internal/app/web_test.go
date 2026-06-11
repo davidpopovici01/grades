@@ -30,7 +30,7 @@ func TestStudentPortalWorkflow(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if err := portalApp.InitStudentPortalAccounts("TempPass123"); err != nil {
+	if err := portalApp.InitStudentPortalAccounts("TempPass123", false); err != nil {
 		t.Fatalf("init accounts: %v", err)
 	}
 	if err := portalApp.PublishStudentPortal(""); err != nil {
@@ -50,14 +50,14 @@ func TestStudentPortalWorkflow(t *testing.T) {
 
 	var login map[string]any
 	status := portalJSONRequest(t, client, http.MethodPost, testServer.URL+"/api/login", map[string]string{
-		"username": "3001",
+		"username": "alice.brown",
 		"password": "TempPass123",
 	}, &login)
 	if status != http.StatusOK {
 		t.Fatalf("login status: got %d", status)
 	}
-	if login["mustChangePassword"] != true {
-		t.Fatalf("expected mustChangePassword true, got %#v", login["mustChangePassword"])
+	if login["mustChangePassword"] != false {
+		t.Fatalf("expected mustChangePassword false, got %#v", login["mustChangePassword"])
 	}
 
 	var me map[string]any
@@ -65,8 +65,8 @@ func TestStudentPortalWorkflow(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("me status: got %d", status)
 	}
-	if me["username"] != "3001" {
-		t.Fatalf("expected username 3001, got %#v", me["username"])
+	if me["username"] != "alice.brown" {
+		t.Fatalf("expected username alice.brown, got %#v", me["username"])
 	}
 
 	var grades portalStudentSnapshot
@@ -139,7 +139,7 @@ func TestStudentPortalWorkflow(t *testing.T) {
 	}
 
 	status = portalJSONRequest(t, client, http.MethodPost, testServer.URL+"/api/login", map[string]string{
-		"username": "3001",
+		"username": "alice.brown",
 		"password": "BetterPass456",
 	}, &login)
 	if status != http.StatusOK {
@@ -155,6 +155,7 @@ func newPortalTestApp(t *testing.T) (*App, string) {
 	}
 	t.Setenv("GRADES_HOME", home)
 	t.Setenv("GRADES_DB_PATH", filepath.Join(home, "grades.db"))
+	t.Setenv("GRADES_NO_OPEN", "1")
 	app, err := New(strings.NewReader(""), ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("new app: %v", err)

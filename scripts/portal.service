@@ -1,0 +1,21 @@
+[Unit]
+Description=Grades Student Portal
+After=network.target
+
+[Service]
+Type=simple
+User=portal
+Group=portal
+WorkingDirectory=/opt/portal
+Environment="PORTAL_DATA_DIR=/opt/portal/data"
+Environment="PORTAL_STATIC_DIR=/opt/portal/static"
+Environment="PORTAL_JWT_SECRET_FILE=/opt/portal/.jwt-secret"
+Environment="PORTAL_ADDR=:8080"
+Environment="PORTAL_COOKIE_SECURE=true"
+Environment="PORTAL_RATE_LIMIT=300"
+ExecStart=/opt/portal/portal
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

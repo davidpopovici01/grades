@@ -1,43 +1,47 @@
 package app
 
 import (
-	"crypto/hmac"
+	"archive/tar"
+	"compress/gzip"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/davidpopovici01/grades/internal/portalauth"
 )
 
 type portalStudentSnapshot struct {
-	StudentID           int                        `json:"studentId"`
-	FirstName           string                     `json:"firstName"`
-	LastName            string                     `json:"lastName"`
-	ChineseName         string                     `json:"chineseName,omitempty"`
-	SchoolStudentID     string                     `json:"schoolStudentId,omitempty"`
-	CourseName          string                     `json:"courseName"`
-	TermName            string                     `json:"termName"`
-	Sections            []string                   `json:"sections"`
-	Username            string                     `json:"username,omitempty"`
-	WeightedTotal       float64                    `json:"weightedTotal"`
-	WeightedTotalLabel  string                     `json:"weightedTotalLabel"`
-	GPA                 float64                    `json:"gpa"`
-	GPALabel            string                     `json:"gpaLabel"`
-	ActiveCategoryCount int                        `json:"activeCategoryCount"`
-	Categories          []portalCategorySnapshot   `json:"categories"`
-	Assignments         []portalAssignmentSnapshot `json:"assignments"`
-	ImprovementTips     []string                   `json:"improvementTips"`
+	StudentID                  int                        `json:"studentId"`
+	FirstName                  string                     `json:"firstName"`
+	LastName                   string                     `json:"lastName"`
+	ChineseName                string                     `json:"chineseName,omitempty"`
+	SchoolStudentID            string                     `json:"schoolStudentId,omitempty"`
+	CourseName                 string                     `json:"courseName"`
+	TermName                   string                     `json:"termName"`
+	Sections                   []string                   `json:"sections"`
+	Username                   string                     `json:"username,omitempty"`
+	WeightedTotal              float64                    `json:"weightedTotal"`
+	WeightedTotalLabel         string                     `json:"weightedTotalLabel"`
+	LetterGrade                string                     `json:"letterGrade"`
+	GPA                        float64                    `json:"gpa"`
+	GPALabel                   string                     `json:"gpaLabel"`
+	ActiveCategoryCount        int                        `json:"activeCategoryCount"`
+	OverviewCutoffAssignmentID int                        `json:"overviewCutoffAssignmentId"`
+	Categories                 []portalCategorySnapshot   `json:"categories"`
+	Assignments                []portalAssignmentSnapshot `json:"assignments"`
+	ImprovementTips            []string                   `json:"improvementTips"`
 }
 
 type portalCategorySnapshot struct {
@@ -65,6 +69,7 @@ type portalAssignmentSnapshot struct {
 	Lift                float64  `json:"lift"`
 	Score               *float64 `json:"score,omitempty"`
 	Flags               []string `json:"flags"`
+	IsBeforeCutoff      bool     `json:"isBeforeCutoff"`
 	CurrentPercent      float64  `json:"currentPercent"`
 	CurrentPercentLabel string   `json:"currentPercentLabel"`
 }
@@ -132,6 +137,21 @@ func (a *App) PublishStudentPortal(dir string) error {
 	if err := writeJSONFile(filepath.Join(publishDir, "index.json"), indexPayload); err != nil {
 		return err
 	}
+
+	// Export student accounts for the stateless portal server.
+	accounts, err := a.portalAccountsForCourseTerm(ctx.CourseYearID, ctx.TermID)
+	if err != nil {
+		return err
+	}
+	accountList := portalauth.AccountList{
+		Version:     1,
+		PublishedAt: snapshot.PublishedAt,
+		Accounts:    accounts,
+	}
+	if err := writeJSONFile(filepath.Join(publishDir, "accounts.json"), accountList); err != nil {
+		return err
+	}
+
 	for _, student := range snapshot.Students {
 		if err := writeJSONFile(filepath.Join(publishDir, "students", strconv.Itoa(student.StudentID)+".json"), student); err != nil {
 			return err
@@ -139,15 +159,166 @@ func (a *App) PublishStudentPortal(dir string) error {
 	}
 	fmt.Fprintf(a.out, "Published student portal to %s\n", publishDir)
 	fmt.Fprintf(a.out, "Published %d student snapshot(s)\n", len(snapshot.Students))
+	fmt.Fprintf(a.out, "Exported %d account(s)\n", len(accounts))
 	return nil
 }
 
-func (a *App) InitStudentPortalAccounts(defaultPassword string) error {
+// DeployStudentPortal uploads published portal data to the remote server via tar over ssh.
+func (a *App) DeployStudentPortal(verbose bool) error {
+	server := a.v.GetString("portal.server")
+	if server == "" {
+		return errors.New("portal server not configured. Add portal.server to your config file (~/.grades/config.yaml)")
+	}
+	key := a.v.GetString("portal.key")
+	remoteDir := a.v.GetString("portal.remote_dir")
+	if remoteDir == "" {
+		remoteDir = "~/portal"
+	}
+
+	publishDir := filepath.Join(a.homeDir, "..", "gradesPublished")
+	if _, err := os.Stat(publishDir); os.IsNotExist(err) {
+		return errors.New("no published data found. Run 'grades publish' or 'grades web deploy' (without --no-publish) first")
+	}
+
+	remoteDataDir := remoteDir + "/data"
+
+	fmt.Fprintf(a.out, "Deploying to %s\n", server)
+	fmt.Fprintf(a.out, "  Local:  %s\n", publishDir)
+	fmt.Fprintf(a.out, "  Remote: %s\n", remoteDataDir)
+
+	// Build ssh options (without server)
+	sshOpts := []string{"-o", "StrictHostKeyChecking=no"}
+	if key != "" {
+		sshOpts = append(sshOpts, "-i", key)
+	}
+
+	// Build local tar, then stream it over a single SSH connection
+	// (avoids multiple auth windows and pipe deadlock on Windows)
+	fmt.Fprintln(a.out, "  Creating archive...")
+
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("portal-%d.tar.gz", time.Now().Unix()))
+	defer os.Remove(tmpFile)
+
+	entries := []string{"accounts.json", "index.json", "students"}
+	if err := createTarGz(tmpFile, publishDir, entries); err != nil {
+		return fmt.Errorf("tar create failed: %w", err)
+	}
+
+	fmt.Fprintln(a.out, "  Uploading and extracting via ssh...")
+	sshArgs := append([]string{}, sshOpts...)
+	sshArgs = append(sshArgs, server, fmt.Sprintf("cd %s && tar xzf -", remoteDataDir))
+	sshCmd := exec.Command("ssh", sshArgs...)
+	f, err := os.Open(tmpFile)
+	if err != nil {
+		return fmt.Errorf("open archive failed: %w", err)
+	}
+	defer f.Close()
+	sshCmd.Stdin = f
+	if out, err := sshCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("ssh upload/extract failed: %w\n%s", err, out)
+	}
+
+	fmt.Fprintln(a.out, "Deployed successfully.")
+	return nil
+}
+
+// createTarGz creates a gzipped tar archive of the named entries inside baseDir.
+func createTarGz(dest, baseDir string, entries []string) error {
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	for _, entry := range entries {
+		fullPath := filepath.Join(baseDir, entry)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			if err := addDirToTar(tw, baseDir, entry); err != nil {
+				return err
+			}
+		} else {
+			if err := addFileToTar(tw, baseDir, entry); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func addFileToTar(tw *tar.Writer, baseDir, relPath string) error {
+	fullPath := filepath.Join(baseDir, relPath)
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return err
+	}
+	hdr, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		return err
+	}
+	hdr.Name = filepath.ToSlash(relPath)
+	if err := tw.WriteHeader(hdr); err != nil {
+		return err
+	}
+	f, err := os.Open(fullPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(tw, f)
+	return err
+}
+
+func addDirToTar(tw *tar.Writer, baseDir, relPath string) error {
+	fullPath := filepath.Join(baseDir, relPath)
+	return filepath.Walk(fullPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(baseDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			_, err = io.Copy(tw, f)
+			return err
+		}
+		return nil
+	})
+}
+
+func (a *App) InitStudentPortalAccounts(defaultPassword string, memorable bool) error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return errors.New("set year, term, and course first")
 	}
-	results, err := a.ensurePortalAccounts(ctx.CourseYearID, ctx.TermID, defaultPassword)
+	results, err := a.ensurePortalAccounts(ctx.CourseYearID, ctx.TermID, defaultPassword, memorable)
 	if err != nil {
 		return err
 	}
@@ -162,7 +333,7 @@ func (a *App) InitStudentPortalAccounts(defaultPassword string) error {
 	return nil
 }
 
-func (a *App) ResetStudentPortalPassword(studentRef, password string) error {
+func (a *App) ResetStudentPortalPassword(studentRef, password string, memorable bool) error {
 	if err := a.ensureStudentCommandContext(); err != nil {
 		return err
 	}
@@ -171,12 +342,12 @@ func (a *App) ResetStudentPortalPassword(studentRef, password string) error {
 		return err
 	}
 	if strings.TrimSpace(password) == "" {
-		password, err = randomPassword(12)
+		password, err = portalauth.RandomOrMemorablePassword(memorable)
 		if err != nil {
 			return err
 		}
 	}
-	hash, salt, err := hashPortalPassword(password)
+	hash, salt, err := portalauth.HashPassword(password)
 	if err != nil {
 		return err
 	}
@@ -184,22 +355,74 @@ func (a *App) ResetStudentPortalPassword(studentRef, password string) error {
 	if err != nil {
 		username = nextPortalUsername(student, map[string]bool{})
 	}
+	changedAt := time.Now().UTC().Format(time.RFC3339)
 	_, err = a.db.Exec(`
-		INSERT INTO student_accounts(student_pk, username, password_salt, password_hash, must_change_password, updated_at)
-		VALUES (?, ?, ?, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		INSERT INTO student_accounts(student_pk, username, password_salt, password_hash, must_change_password, password_changed_at, updated_at)
+		VALUES (?, ?, ?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		ON CONFLICT(student_pk) DO UPDATE SET
 			username = excluded.username,
 			password_salt = excluded.password_salt,
 			password_hash = excluded.password_hash,
 			must_change_password = excluded.must_change_password,
+			password_changed_at = excluded.password_changed_at,
 			updated_at = excluded.updated_at`,
-		student.ID, username, salt, hash)
+		student.ID, username, salt, hash, changedAt)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(a.out, "Reset portal password for %s %s\n", student.FirstName, student.LastName)
 	fmt.Fprintf(a.out, "Username:\t%s\n", username)
 	fmt.Fprintf(a.out, "Temporary password:\t%s\n", password)
+	return nil
+}
+
+func (a *App) ListStudentPortalAccounts() error {
+	ctx := a.context()
+	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return errors.New("set year, term, and course first")
+	}
+
+	rows, err := a.db.Query(`
+		SELECT students.student_pk, students.first_name, students.last_name,
+		       COALESCE(student_accounts.username, ''),
+		       COALESCE(student_accounts.must_change_password, 0)
+		FROM students
+		JOIN section_enrollments ON section_enrollments.student_pk = students.student_pk
+		JOIN sections ON sections.section_id = section_enrollments.section_id
+		LEFT JOIN student_accounts ON student_accounts.student_pk = students.student_pk
+		WHERE sections.course_year_id = ? AND section_enrollments.term_id = ?
+		GROUP BY students.student_pk
+		ORDER BY students.last_name, students.first_name`,
+		ctx.CourseYearID, ctx.TermID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	fmt.Fprintln(a.out, "Student portal accounts")
+	fmt.Fprintln(a.out, "Name\t\t\tUsername\t\tStatus")
+	count := 0
+	for rows.Next() {
+		var studentID int
+		var firstName, lastName, username string
+		var mustChange int
+		if err := rows.Scan(&studentID, &firstName, &lastName, &username, &mustChange); err != nil {
+			return err
+		}
+		name := firstName + " " + lastName
+		status := "not created"
+		if username != "" {
+			status = "active"
+		}
+		fmt.Fprintf(a.out, "%-23s\t%-20s\t%s\n", name, username, status)
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "\n%d student(s)\n", count)
+	fmt.Fprintln(a.out, "\nNote: Passwords are stored hashed and cannot be displayed.")
+	fmt.Fprintln(a.out, "Use 'grades web accounts reset <student> --memorable' to generate a new password.")
 	return nil
 }
 
@@ -211,7 +434,7 @@ func (a *App) ServeStudentPortal(addr, dir string) error {
 	if strings.TrimSpace(addr) == "" {
 		addr = "127.0.0.1:8080"
 	}
-	created, err := a.ensurePortalAccounts(ctx.CourseYearID, ctx.TermID, "")
+	created, err := a.ensurePortalAccounts(ctx.CourseYearID, ctx.TermID, "", false)
 	if err != nil {
 		return err
 	}
@@ -263,8 +486,9 @@ func (a *App) buildPortalCourseSnapshot(courseYearID, termID int) (portalCourseS
 	if err != nil {
 		return portalCourseSnapshot{}, err
 	}
+	cutoff, _ := a.OverviewCutoff()
 	for _, student := range students {
-		item, err := a.buildPortalStudentSnapshot(snapshot.CourseName, snapshot.TermName, courseYearID, termID, student, rules)
+		item, err := a.buildPortalStudentSnapshot(snapshot.CourseName, snapshot.TermName, courseYearID, termID, student, rules, cutoff)
 		if err != nil {
 			return portalCourseSnapshot{}, err
 		}
@@ -279,7 +503,7 @@ func (a *App) buildPortalCourseSnapshot(courseYearID, termID int) (portalCourseS
 	return snapshot, nil
 }
 
-func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYearID, termID int, student Student, rules []CategoryRule) (portalStudentSnapshot, error) {
+func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYearID, termID int, student Student, rules []CategoryRule, cutoff int) (portalStudentSnapshot, error) {
 	ctx := a.context()
 	defer func(previous Context) {
 		a.v.Set("context.year", previous.Year)
@@ -304,21 +528,23 @@ func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYear
 	categorySnapshots, weightedTotal, weightedLabel, activeCategoryCount := portalCategorySnapshots(rules, details)
 	username, _ := a.studentPortalUsername(student.ID)
 	item := portalStudentSnapshot{
-		StudentID:           student.ID,
-		FirstName:           student.FirstName,
-		LastName:            student.LastName,
-		ChineseName:         student.ChineseName,
-		SchoolStudentID:     student.SchoolStudentID,
-		CourseName:          courseName,
-		TermName:            termName,
-		Sections:            sections,
-		Username:            username,
-		WeightedTotal:       weightedTotal,
-		WeightedTotalLabel:  weightedLabel,
-		GPA:                 weightedTotal,
-		GPALabel:            weightedLabel,
-		ActiveCategoryCount: activeCategoryCount,
-		Categories:          categorySnapshots,
+		StudentID:                  student.ID,
+		FirstName:                  student.FirstName,
+		LastName:                   student.LastName,
+		ChineseName:                student.ChineseName,
+		SchoolStudentID:            student.SchoolStudentID,
+		CourseName:                 courseName,
+		TermName:                   termName,
+		Sections:                   sections,
+		Username:                   username,
+		WeightedTotal:              weightedTotal,
+		WeightedTotalLabel:         weightedLabel,
+		LetterGrade:                portalauth.AmericanLetterGrade(weightedTotal),
+		GPA:                        weightedTotal,
+		GPALabel:                   weightedLabel,
+		ActiveCategoryCount:        activeCategoryCount,
+		OverviewCutoffAssignmentID: cutoff,
+		Categories:                 categorySnapshots,
 	}
 	for _, detail := range details {
 		var score *float64
@@ -347,11 +573,12 @@ func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYear
 			Lift:                detail.Lift,
 			Score:               score,
 			Flags:               detail.Flags,
+			IsBeforeCutoff:      cutoff > 0 && detail.AssignmentID <= cutoff,
 			CurrentPercent:      currentPercent,
 			CurrentPercentLabel: fmt.Sprintf("%.1f%%", currentPercent),
 		})
 	}
-	item.ImprovementTips = portalImprovementTips(item.Assignments, item.Categories)
+	item.ImprovementTips = portalImprovementTips(item.Assignments, item.Categories, cutoff)
 	return item, nil
 }
 
@@ -447,22 +674,30 @@ func portalCategoryScore(rule CategoryRule, items []portalAssignmentDetail) (flo
 			return 0, false
 		}
 		total := 0.0
+		count := 0
 		for _, item := range items {
 			if portalAssignmentHasEntry(item.Grade) {
 				hasEntry = true
 			}
+			if !countsTowardAssignmentAverage(item.Grade) {
+				continue
+			}
 			total += completionPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift)
+			count++
 		}
-		if !hasEntry {
+		if !hasEntry || count == 0 {
 			return 0, false
 		}
-		return total / float64(len(items)), true
+		return total / float64(count), true
 	case "total-points":
 		sum := 0.0
 		maxTotal := 0.0
 		for _, item := range items {
 			if portalAssignmentHasEntry(item.Grade) {
 				hasEntry = true
+			}
+			if !countsTowardAssignmentAverage(item.Grade) {
+				continue
 			}
 			maxTotal += float64(item.Grade.MaxPoints)
 			sum += (recordPercent(item.Grade, item.Anchor, item.Lift) / 100) * float64(item.Grade.MaxPoints)
@@ -476,16 +711,21 @@ func portalCategoryScore(rule CategoryRule, items []portalAssignmentDetail) (flo
 			return 0, false
 		}
 		total := 0.0
+		count := 0
 		for _, item := range items {
 			if portalAssignmentHasEntry(item.Grade) {
 				hasEntry = true
 			}
+			if !countsTowardAssignmentAverage(item.Grade) {
+				continue
+			}
 			total += recordPercent(item.Grade, item.Anchor, item.Lift)
+			count++
 		}
-		if !hasEntry {
+		if !hasEntry || count == 0 {
 			return 0, false
 		}
-		return total / float64(len(items)), true
+		return total / float64(count), true
 	}
 }
 
@@ -493,9 +733,13 @@ func portalAssignmentHasEntry(record GradeRecord) bool {
 	return record.Score.Valid || record.Flags != 0
 }
 
-func portalImprovementTips(assignments []portalAssignmentSnapshot, categories []portalCategorySnapshot) []string {
+func portalImprovementTips(assignments []portalAssignmentSnapshot, categories []portalCategorySnapshot, cutoff int) []string {
 	var tips []string
 	for _, item := range assignments {
+		// Skip assignments before the overview cutoff.
+		if cutoff > 0 && item.AssignmentID <= cutoff {
+			continue
+		}
 		if containsFlag(item.Flags, "missing") {
 			tips = append(tips, "Finish missing work: "+item.Title)
 		} else if containsFlag(item.Flags, "redo") {
@@ -576,7 +820,7 @@ func (a *App) portalAssignmentDetails(studentID int) ([]portalAssignmentDetail, 
 	return out, rows.Err()
 }
 
-func (a *App) ensurePortalAccounts(courseYearID, termID int, defaultPassword string) ([]accountInitResult, error) {
+func (a *App) ensurePortalAccounts(courseYearID, termID int, defaultPassword string, memorable bool) ([]accountInitResult, error) {
 	students, err := a.studentsForCourseTerm(courseYearID, termID, false)
 	if err != nil {
 		return nil, err
@@ -622,19 +866,20 @@ func (a *App) ensurePortalAccounts(courseYearID, termID int, defaultPassword str
 		usedUsernames[strings.ToLower(username)] = true
 		password := strings.TrimSpace(defaultPassword)
 		if password == "" {
-			password, err = randomPassword(12)
+			password, err = portalauth.RandomOrMemorablePassword(memorable)
 			if err != nil {
 				return nil, err
 			}
 		}
-		hash, salt, err := hashPortalPassword(password)
+		hash, salt, err := portalauth.HashPassword(password)
 		if err != nil {
 			return nil, err
 		}
+		changedAt := time.Now().UTC().Format(time.RFC3339)
 		if _, err := a.db.Exec(`
-			INSERT INTO student_accounts(student_pk, username, password_salt, password_hash, must_change_password)
-			VALUES (?, ?, ?, ?, 1)`,
-			student.ID, username, salt, hash); err != nil {
+			INSERT INTO student_accounts(student_pk, username, password_salt, password_hash, must_change_password, password_changed_at)
+			VALUES (?, ?, ?, ?, 0, ?)`,
+			student.ID, username, salt, hash, changedAt); err != nil {
 			return nil, err
 		}
 		results = append(results, accountInitResult{
@@ -649,10 +894,10 @@ func (a *App) ensurePortalAccounts(courseYearID, termID int, defaultPassword str
 
 func nextPortalUsername(student Student, used map[string]bool) string {
 	candidates := []string{
-		normalizePortalUsername(student.SchoolStudentID),
-		normalizePortalUsername(student.PowerSchoolNum),
 		normalizePortalUsername(student.FirstName + "." + student.LastName),
 		normalizePortalUsername(student.FirstName + student.LastName),
+		normalizePortalUsername(student.SchoolStudentID),
+		normalizePortalUsername(student.PowerSchoolNum),
 	}
 	for _, candidate := range candidates {
 		if candidate == "" {
@@ -696,51 +941,6 @@ func normalizePortalUsername(value string) string {
 	return strings.Trim(out.String(), ".")
 }
 
-func randomPassword(length int) (string, error) {
-	if length < 8 {
-		length = 8
-	}
-	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
-	buffer := make([]byte, length)
-	random := make([]byte, length)
-	if _, err := rand.Read(random); err != nil {
-		return "", err
-	}
-	for idx := range buffer {
-		buffer[idx] = alphabet[int(random[idx])%len(alphabet)]
-	}
-	return string(buffer), nil
-}
-
-func hashPortalPassword(password string) (hash string, salt string, err error) {
-	saltBytes := make([]byte, 16)
-	if _, err := rand.Read(saltBytes); err != nil {
-		return "", "", err
-	}
-	return derivePortalPassword(password, saltBytes), hex.EncodeToString(saltBytes), nil
-}
-
-func derivePortalPassword(password string, salt []byte) string {
-	mac := hmac.New(sha256.New, salt)
-	_, _ = mac.Write([]byte(password))
-	derived := mac.Sum(nil)
-	for idx := 0; idx < 120000; idx++ {
-		next := hmac.New(sha256.New, salt)
-		_, _ = next.Write(derived)
-		derived = next.Sum(nil)
-	}
-	return hex.EncodeToString(derived)
-}
-
-func verifyPortalPassword(password, saltHex, expected string) bool {
-	salt, err := hex.DecodeString(saltHex)
-	if err != nil {
-		return false
-	}
-	actual := derivePortalPassword(password, salt)
-	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
-}
-
 func (a *App) studentPortalUsername(studentID int) (string, error) {
 	var username string
 	err := a.db.QueryRow(`SELECT username FROM student_accounts WHERE student_pk = ?`, studentID).Scan(&username)
@@ -748,6 +948,36 @@ func (a *App) studentPortalUsername(studentID int) (string, error) {
 		return "", err
 	}
 	return username, nil
+}
+
+func (a *App) portalAccountsForCourseTerm(courseYearID, termID int) ([]portalauth.Account, error) {
+	rows, err := a.db.Query(`
+		SELECT sa.student_pk, sa.username, sa.password_salt, sa.password_hash, sa.must_change_password, COALESCE(sa.password_changed_at, '1970-01-01T00:00:00Z')
+		FROM student_accounts sa
+		JOIN section_enrollments se ON se.student_pk = sa.student_pk
+		JOIN sections s ON s.section_id = se.section_id
+		WHERE s.course_year_id = ? AND se.term_id = ?
+		GROUP BY sa.student_pk
+		ORDER BY sa.student_pk`, courseYearID, termID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []portalauth.Account
+	for rows.Next() {
+		var acc portalauth.Account
+		var mustChange int
+		if err := rows.Scan(&acc.StudentID, &acc.Username, &acc.PasswordSalt, &acc.PasswordHash, &mustChange, &acc.PasswordChangedAt); err != nil {
+			return nil, err
+		}
+		acc.MustChangePassword = mustChange != 0
+		accounts = append(accounts, acc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return accounts, nil
 }
 
 func writeJSONFile(path string, data any) error {
@@ -867,7 +1097,7 @@ func (s *portalServer) handleChangePassword(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusUnauthorized, "current password is incorrect")
 		return
 	}
-	hash, salt, err := hashPortalPassword(payload.NewPassword)
+	hash, salt, err := portalauth.HashPassword(payload.NewPassword)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "could not update password")
 		return
@@ -915,7 +1145,7 @@ func (s *portalServer) authenticate(username, password string) (int, bool, error
 	if err != nil {
 		return 0, false, err
 	}
-	if !verifyPortalPassword(password, salt, hash) {
+	if !portalauth.VerifyPassword(password, salt, hash) {
 		return 0, false, errors.New("invalid password")
 	}
 	return studentID, mustChange != 0, nil
@@ -927,7 +1157,7 @@ func (s *portalServer) verifyStudentPassword(studentID int, password string) (bo
 	if err != nil {
 		return false, err
 	}
-	return verifyPortalPassword(password, salt, hash), nil
+	return portalauth.VerifyPassword(password, salt, hash), nil
 }
 
 func (s *portalServer) accountInfo(studentID int) (string, bool, error) {

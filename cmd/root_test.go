@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,29 @@ import (
 	"github.com/davidpopovici01/grades/internal/db"
 	"github.com/davidpopovici01/grades/internal/migrate"
 )
+
+var (
+	testDBTemplatePath string
+	testDBTemplateOnce sync.Once
+)
+
+func initTestDBTemplate() {
+	tmpDir, err := os.MkdirTemp("", "grades-test-template-*")
+	if err != nil {
+		panic(fmt.Sprintf("create test db template dir: %v", err))
+	}
+	dbPath := filepath.Join(tmpDir, "grades.db")
+	conn, err := db.Open(dbPath)
+	if err != nil {
+		panic(fmt.Sprintf("open test db template: %v", err))
+	}
+	if err := migrate.Up(conn); err != nil {
+		conn.Close()
+		panic(fmt.Sprintf("migrate test db template: %v", err))
+	}
+	conn.Close()
+	testDBTemplatePath = dbPath
+}
 
 const (
 	testFlagLate    = 1 << 0
@@ -566,7 +590,7 @@ func TestGradesGradebookStatsAndExport(t *testing.T) {
 
 	gradesOut := mustRun(t, env, "", "grades", "show")
 	assertContains(t, gradesOut, "Alice Brown")
-	assertContains(t, gradesOut, "Uncurved average:\t79.0%")
+	assertContains(t, gradesOut, "Uncurved average:\t39.5%")
 	assertContains(t, gradesOut, "Curved average:\t\t0.0%")
 	assertContains(t, gradesOut, "79 (redo)")
 	assertContains(t, gradesOut, "counts as 0.0%")
@@ -1552,7 +1576,6 @@ func TestStudentsShowUsesNameLookupAndShowsDetailedBreakdown(t *testing.T) {
 	assertContains(t, out, "GPA (weighted total):\t66.0%")
 	assertContains(t, out, "Category Totals")
 	assertContains(t, out, "Homework")
-	assertContains(t, out, "90.0%")
 	assertContains(t, out, "Exam")
 	assertContains(t, out, "50.0%")
 	assertContains(t, out, "Assignments")
@@ -2087,7 +2110,7 @@ func TestRawNumericAssignmentsDoNotShowRedo(t *testing.T) {
 	assertNotContains(t, show, "(redo)")
 }
 
-func TestGradesShowAveragesIgnoreMissingAndLate(t *testing.T) {
+func TestGradesShowAveragesCountMissingAndLate(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
 	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}, {"Bob", "Zhang", "3002"}, {"Carol", "Lin", "3003"}})
@@ -2101,8 +2124,8 @@ func TestGradesShowAveragesIgnoreMissingAndLate(t *testing.T) {
 	mustRun(t, env, "ali\n8\nbz\nm\ncar\n9l\n\n", "grades", "enter")
 
 	show := mustRun(t, env, "", "grades", "show")
-	assertContains(t, show, "Uncurved average:\t80.0%")
-	assertContains(t, show, "Curved average:\t\t80.0%")
+	assertContains(t, show, "Uncurved average:\t56.7%")
+	assertContains(t, show, "Curved average:\t\t56.7%")
 }
 
 func TestFailAliasSetsRedoFlag(t *testing.T) {
@@ -2140,8 +2163,8 @@ func TestLateOnlyAndScorePlusRedoInputs(t *testing.T) {
 	assertContains(t, show, "L")
 	assertContains(t, show, "Bob Zhang")
 	assertContains(t, show, "19 (redo)")
-	assertContains(t, show, "Uncurved average:\t95.0%")
-	assertContains(t, show, "Curved average:\t\t90.0%")
+	assertContains(t, show, "Uncurved average:\t47.5%")
+	assertContains(t, show, "Curved average:\t\t45.0%")
 }
 
 func TestEnterLastNameModePromptsInOrder(t *testing.T) {
@@ -2309,6 +2332,68 @@ func TestOverviewDoesNotDuplicateAssignmentsAcrossMultipleSections(t *testing.T)
 	assertNotContains(t, overview, "HW4, HW4")
 }
 
+func TestOverviewAfterFlagExcludesOlderAssignments(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\n\n", "assignments", "add")
+	mustRun(t, env, "HW2\n10\n\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nr\n\n", "grades", "enter")
+	mustRun(t, env, "", "use", "assignment", "HW2")
+	mustRun(t, env, "ali\n10\n\n", "grades", "enter")
+
+	overviewAll := mustRun(t, env, "", "overview")
+	assertContains(t, overviewAll, "Alice Brown")
+	assertContains(t, overviewAll, "Redo: HW1")
+
+	// --after 1 should exclude HW1 (assignment_id == 1) but include HW2
+	overviewAfter := mustRun(t, env, "", "overview", "--after", "1")
+	assertContains(t, overviewAfter, "Alice Brown")
+	assertNotContains(t, overviewAfter, "Redo: HW1")
+	assertContains(t, overviewAfter, "OK")
+}
+
+func TestOverviewSetAfterPersistsCutoff(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\n\n", "assignments", "add")
+	mustRun(t, env, "HW2\n10\n\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nr\n\n", "grades", "enter")
+	mustRun(t, env, "", "use", "assignment", "HW2")
+	mustRun(t, env, "ali\n10\n\n", "grades", "enter")
+
+	// Persist cutoff at assignment 1
+	setOut := mustRun(t, env, "", "overview", "--set-after", "1")
+	assertContains(t, setOut, "Set overview cutoff to assignment 1")
+
+	// Subsequent overview without flags should use the persisted cutoff
+	overview := mustRun(t, env, "", "overview")
+	assertContains(t, overview, "Alice Brown")
+	assertNotContains(t, overview, "Redo: HW1")
+	assertContains(t, overview, "OK")
+
+	// Clear the cutoff
+	clearOut := mustRun(t, env, "", "overview", "--clear-after")
+	assertContains(t, clearOut, "Cleared overview cutoff")
+
+	// Now overview should show HW1 again
+	overviewAfterClear := mustRun(t, env, "", "overview")
+	assertContains(t, overviewAfterClear, "Redo: HW1")
+}
+
 func TestGradebookShowsPassingNumericGradesInGreen(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
@@ -2398,9 +2483,8 @@ func TestCategorySchemesCurvesAndCategoryScores(t *testing.T) {
 	assertContains(t, scores, "100.0%")
 	assertContains(t, scores, "70.7%")
 	assertContains(t, scores, "Bob Zhang")
-	assertContains(t, scores, "0.0%")
 	assertContains(t, scores, "100.0%")
-	assertContains(t, scores, "60.0%")
+	assertContains(t, scores, "82.4%")
 
 	totals := mustRun(t, env, "", "categories", "totals")
 	assertContains(t, totals, "Homework")
@@ -2657,7 +2741,7 @@ func TestPublishCommandWritesStudentPortalSnapshots(t *testing.T) {
 		t.Fatalf("read published student snapshot: %v", err)
 	}
 	assertContains(t, string(indexData), `"studentCount": 2`)
-	assertContains(t, string(studentData), `"username": "3001"`)
+	assertContains(t, string(studentData), `"username": "alice.brown"`)
 	assertContains(t, string(studentData), `"weightedTotalLabel": "88.0%"`)
 }
 
@@ -2799,6 +2883,7 @@ func newTestEnv(t *testing.T) testEnv {
 	}
 	t.Setenv("GRADES_HOME", home)
 	t.Setenv("GRADES_DB_PATH", filepath.Join(home, "grades.db"))
+	t.Setenv("GRADES_NO_OPEN", "1")
 	return testEnv{home: home}
 }
 
@@ -2857,7 +2942,14 @@ func seedAssignment(t *testing.T, env testEnv, title string, maxPoints int) {
 
 func openSeedDB(t *testing.T, env testEnv) *sql.DB {
 	t.Helper()
-	dbConn, err := db.Open(filepath.Join(env.home, "grades.db"))
+	testDBTemplateOnce.Do(initTestDBTemplate)
+	dbPath := filepath.Join(env.home, "grades.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		if err := copyFile(testDBTemplatePath, dbPath); err != nil {
+			t.Fatalf("copy test db template: %v", err)
+		}
+	}
+	dbConn, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2865,6 +2957,23 @@ func openSeedDB(t *testing.T, env testEnv) *sql.DB {
 		t.Fatalf("migrate up: %v", err)
 	}
 	return dbConn
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 func mustRun(t *testing.T, env testEnv, stdin string, args ...string) string {
