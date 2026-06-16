@@ -45,7 +45,9 @@ func initTestDBTemplate() {
 const (
 	testFlagLate    = 1 << 0
 	testFlagMissing = 1 << 1
+	testFlagPass    = 1 << 2
 	testFlagRedo    = 1 << 3
+	testFlagLocked0 = 1 << 4
 )
 
 func TestContextAndListCommands(t *testing.T) {
@@ -1037,6 +1039,39 @@ func TestCategoriesImport(t *testing.T) {
 	assertContains(t, listed, "Total weight:\t100.0%")
 }
 
+func TestCategoriesImportWithShowInOverview(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'Exam 1', 100)`); err != nil {
+		t.Fatalf("insert assignment: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+
+	importPath := filepath.Join(env.home, "categories.csv")
+	csvData := strings.Join([]string{
+		"category,weight,scheme,pass_rate,show_in_overview",
+		"Homework,40,completion,80,true",
+		"Quiz,60,completion,80,false",
+	}, "\n")
+	if err := os.WriteFile(importPath, []byte(csvData), 0o644); err != nil {
+		t.Fatalf("write categories csv: %v", err)
+	}
+
+	out := mustRun(t, env, "", "categories", "import", importPath)
+	assertContains(t, out, "Imported 2 category row(s)")
+
+	list := mustRun(t, env, "", "categories", "list")
+	assertContains(t, list, "Homework")
+	assertContains(t, list, "visible")
+	assertContains(t, list, "Quiz")
+	assertContains(t, list, "hidden")
+}
+
 func TestCategoriesImportWizardCreatesDefaultTemplateWhenMissing(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
@@ -1202,6 +1237,134 @@ func TestMarkLateDoesNotCountAlreadyLateMissingRows(t *testing.T) {
 
 	out := mustRun(t, env, "", "mark-late")
 	assertContains(t, out, "Marked 1 missing grade(s) as late.")
+}
+
+func TestMarkZeroRedo(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name) VALUES (10, 'Alice', 'Brown'), (11, 'Bob', 'Zhang'), (12, 'Carol', 'Doe')`); err != nil {
+		t.Fatalf("insert students: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active'), (1, 11, 1, '2026-08-15', 'active'), (1, 12, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollments: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'Homework 1', 10)`); err != nil {
+		t.Fatalf("insert assignment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count) VALUES
+		(1, 10, 0, 0, 0),
+		(1, 11, 0, ?, 0),
+		(1, 12, 5, 0, 0)`,
+		testFlagMissing); err != nil {
+		t.Fatalf("insert grades: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "use", "assignment", "Homework 1")
+
+	out := mustRun(t, env, "", "mark-zero-redo")
+	assertContains(t, out, "Marked 2 zero grade(s) as redo.")
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "Alice Brown")
+	assertContains(t, show, "0 (redo)")
+	assertContains(t, show, "Bob Zhang")
+	assertContains(t, show, "Carol Doe")
+	assertContains(t, show, "counts as 50.0%")
+}
+
+func TestMarkZeroLate(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name) VALUES (10, 'Alice', 'Brown'), (11, 'Bob', 'Zhang'), (12, 'Carol', 'Doe')`); err != nil {
+		t.Fatalf("insert students: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active'), (1, 11, 1, '2026-08-15', 'active'), (1, 12, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollments: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'Homework 1', 10)`); err != nil {
+		t.Fatalf("insert assignment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count) VALUES
+		(1, 10, 0, 0, 0),
+		(1, 11, 0, ?, 0),
+		(1, 12, 5, 0, 0)`,
+		testFlagMissing); err != nil {
+		t.Fatalf("insert grades: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "use", "assignment", "Homework 1")
+
+	out := mustRun(t, env, "", "mark-zero-late")
+	assertContains(t, out, "Marked 2 zero grade(s) as late.")
+
+	aliceID := studentIDByName(t, dbConn, "Alice", "Brown")
+	var aliceScore sql.NullFloat64
+	var aliceFlags int
+	if err := dbConn.QueryRow(`SELECT score, flags_bitmask FROM grades WHERE assignment_id = 1 AND student_pk = ?`, aliceID).Scan(&aliceScore, &aliceFlags); err != nil {
+		t.Fatalf("query alice late grade: %v", err)
+	}
+	if aliceScore.Valid {
+		t.Fatalf("expected Alice's late-marked grade to have no score, got %v", aliceScore.Float64)
+	}
+	if aliceFlags != testFlagLate {
+		t.Fatalf("expected Alice's late flags to be late only, got %d", aliceFlags)
+	}
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "Alice Brown")
+	assertContains(t, show, "L")
+	assertContains(t, show, "Bob Zhang")
+	assertContains(t, show, "Carol Doe")
+	assertContains(t, show, "counts as 50.0%")
+}
+
+func TestMarkZeroRedoSkipsPassAndCheat(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name) VALUES (10, 'Alice', 'Brown'), (11, 'Bob', 'Zhang')`); err != nil {
+		t.Fatalf("insert students: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active'), (1, 11, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollments: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'Homework 1', 10)`); err != nil {
+		t.Fatalf("insert assignment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count) VALUES
+		(1, 10, 0, ?, 0),
+		(1, 11, 0, ?, 0)`,
+		testFlagPass, testFlagLocked0); err != nil {
+		t.Fatalf("insert grades: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "use", "assignment", "Homework 1")
+
+	out := mustRun(t, env, "", "mark-zero-redo")
+	assertContains(t, out, "Marked 0 zero grade(s) as redo.")
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "Alice Brown")
+	assertContains(t, show, "P")
+	assertContains(t, show, "Bob Zhang")
+	assertNotContains(t, show, "(redo)")
 }
 
 func TestClearLateAndClearRedo(t *testing.T) {
@@ -2125,7 +2288,7 @@ func TestGradesShowAveragesCountMissingAndLate(t *testing.T) {
 
 	show := mustRun(t, env, "", "grades", "show")
 	assertContains(t, show, "Uncurved average:\t56.7%")
-	assertContains(t, show, "Curved average:\t\t56.7%")
+	assertContains(t, show, "Curved average:\t\t53.3%")
 }
 
 func TestFailAliasSetsRedoFlag(t *testing.T) {
@@ -2392,6 +2555,129 @@ func TestOverviewSetAfterPersistsCutoff(t *testing.T) {
 	// Now overview should show HW1 again
 	overviewAfterClear := mustRun(t, env, "", "overview")
 	assertContains(t, overviewAfterClear, "Redo: HW1")
+}
+
+func TestOverviewHidesQuizTestClassworkByDefault(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (10, 'Alice', 'Brown', '3001')`); err != nil {
+		t.Fatalf("insert student: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO categories(category_id, name) VALUES (2, 'Quiz'), (3, 'Test'), (4, 'Classwork'), (5, 'Homework')`); err != nil {
+		t.Fatalf("insert categories: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES
+		(1, 1, 1, 2, 'Quiz 1', 10),
+		(2, 1, 1, 3, 'Test 1', 100),
+		(3, 1, 1, 4, 'Classwork 1', 10),
+		(4, 1, 1, 5, 'HW 1', 10)`); err != nil {
+		t.Fatalf("insert assignments: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask) VALUES
+		(1, 10, 0, ?),
+		(2, 10, 0, ?),
+		(3, 10, 0, ?),
+		(4, 10, 0, ?)`, testFlagMissing, testFlagMissing, testFlagMissing, testFlagMissing); err != nil {
+		t.Fatalf("insert grades: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+
+	overview := mustRun(t, env, "", "overview")
+	assertContains(t, overview, "Alice Brown")
+	assertContains(t, overview, "Missing: HW 1")
+	assertNotContains(t, overview, "Quiz 1")
+	assertNotContains(t, overview, "Test 1")
+	assertNotContains(t, overview, "Classwork 1")
+}
+
+func TestCategoriesShowAndHideOverviewVisibility(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (10, 'Alice', 'Brown', '3001')`); err != nil {
+		t.Fatalf("insert student: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO categories(category_id, name) VALUES (2, 'Quiz'), (3, 'Homework')`); err != nil {
+		t.Fatalf("insert categories: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES
+		(1, 1, 1, 2, 'Quiz 1', 10),
+		(2, 1, 1, 3, 'HW 1', 10)`); err != nil {
+		t.Fatalf("insert assignments: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask) VALUES
+		(1, 10, 0, ?),
+		(2, 10, 0, ?)`, testFlagMissing, testFlagMissing); err != nil {
+		t.Fatalf("insert grades: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+
+	// Quiz is hidden by default; Homework is visible by default.
+	overviewDefault := mustRun(t, env, "", "overview")
+	assertContains(t, overviewDefault, "Missing: HW 1")
+	assertNotContains(t, overviewDefault, "Quiz 1")
+
+	// Show Quiz in overview.
+	mustRun(t, env, "", "categories", "show", "Quiz")
+	overviewWithQuiz := mustRun(t, env, "", "overview")
+	assertContains(t, overviewWithQuiz, "Missing: HW 1")
+	assertContains(t, overviewWithQuiz, "Quiz 1")
+
+	// Hide Homework from overview.
+	mustRun(t, env, "", "categories", "hide", "Homework")
+	overviewHiddenHW := mustRun(t, env, "", "overview")
+	assertContains(t, overviewHiddenHW, "Quiz 1")
+	assertNotContains(t, overviewHiddenHW, "HW 1")
+
+	// set-visibility can also be used.
+	mustRun(t, env, "", "categories", "set-visibility", "Homework", "true")
+	overviewShownHW := mustRun(t, env, "", "overview")
+	assertContains(t, overviewShownHW, "Missing: HW 1")
+}
+
+func TestCategoriesListShowsOverviewVisibility(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO categories(category_id, name) VALUES (2, 'Quiz'), (3, 'Homework')`); err != nil {
+		t.Fatalf("insert categories: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES
+		(1, 1, 1, 2, 'Quiz 1', 10),
+		(2, 1, 1, 3, 'HW 1', 10)`); err != nil {
+		t.Fatalf("insert assignments: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+
+	list := mustRun(t, env, "", "categories", "list")
+	assertContains(t, list, "Quiz")
+	assertContains(t, list, "hidden (default)")
+	assertContains(t, list, "Homework")
+	assertContains(t, list, "visible (default)")
+
+	mustRun(t, env, "", "categories", "show", "Quiz")
+	listAfterShow := mustRun(t, env, "", "categories", "list")
+	assertContains(t, listAfterShow, "Quiz")
+	assertContains(t, listAfterShow, "visible")
 }
 
 func TestGradebookShowsPassingNumericGradesInGreen(t *testing.T) {
@@ -3054,4 +3340,49 @@ func studentIDString(id int) string {
 func currentYearLabel() string {
 	currentYear := time.Now().Year()
 	return fmt.Sprintf("%d-%02d", currentYear, (currentYear+1)%100)
+}
+
+func TestZeroRedoAppearsInRedoListAndOverview(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	if _, err := dbConn.Exec(`INSERT INTO students(student_pk, first_name, last_name) VALUES (10, 'Alice', 'Brown')`); err != nil {
+		t.Fatalf("insert student: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 10, 1, '2026-08-15', 'active')`); err != nil {
+		t.Fatalf("insert enrollment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO category_grading_policies(course_year_id, term_id, category_id, scheme_key, default_pass_percent) VALUES (1, 1, 1, 'completion', 80)`); err != nil {
+		t.Fatalf("insert category policy: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'HW1', 10)`); err != nil {
+		t.Fatalf("insert assignment: %v", err)
+	}
+	if _, err := dbConn.Exec(`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count) VALUES (1, 10, 0, 0, 0)`); err != nil {
+		t.Fatalf("insert grade: %v", err)
+	}
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+
+	mustRun(t, env, "", "mark-zero-redo")
+
+	overview := mustRun(t, env, "", "overview")
+	redoList := mustRun(t, env, "", "grades", "redo", "list", "Alice")
+	makeupList := mustRun(t, env, "", "grades", "make-up", "list", "Alice")
+	makeupPass := mustRun(t, env, "1\n", "grades", "make-up", "pass", "Alice")
+
+	t.Logf("overview:\n%s", overview)
+	t.Logf("redo list:\n%s", redoList)
+	t.Logf("makeup list:\n%s", makeupList)
+	t.Logf("makeup pass:\n%s", makeupPass)
+
+	assertContains(t, overview, "Redo: HW1")
+	assertContains(t, redoList, "HW1")
+	assertContains(t, makeupList, "HW1")
+	assertContains(t, makeupPass, "Recorded PASS for Alice Brown on HW1")
 }

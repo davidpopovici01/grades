@@ -12,6 +12,21 @@ import (
 	"text/tabwriter"
 )
 
+func categoryDefaultShowInOverview(name string) bool {
+	switch strings.ToLower(name) {
+	case "quiz", "quizzes", "test", "tests", "classwork", "classworks":
+		return false
+	}
+	return true
+}
+
+func (r CategoryRule) IsVisibleInOverview() bool {
+	if r.ShowInOverview.Valid {
+		return r.ShowInOverview.Bool
+	}
+	return categoryDefaultShowInOverview(r.CategoryName)
+}
+
 func (a *App) ListCategories() error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
@@ -26,13 +41,13 @@ func (a *App) ListCategories() error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(a.out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "Category\tWeight\tScoring\tDefault pass")
+	fmt.Fprintln(tw, "Category\tWeight\tScoring\tDefault pass\tOverview")
 	for _, rule := range rules {
 		weightLabel := "unweighted"
 		if rule.HasWeight {
 			weightLabel = fmt.Sprintf("%.1f%%", rule.WeightPercent)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", rule.CategoryName, weightLabel, categoryScoringLabel(rule), passPercentLabel(rule.DefaultPassPercent, true))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", rule.CategoryName, weightLabel, categoryScoringLabel(rule), passPercentLabel(rule.DefaultPassPercent, true), categoryOverviewLabel(rule))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -99,6 +114,40 @@ func (a *App) SetCategoryPassRate(value, raw string) error {
 		return err
 	}
 	fmt.Fprintf(a.out, "Set category pass rate: %s = %s\n", categoryName, passPercentLabel(passPercent, false))
+	return nil
+}
+
+func (a *App) upsertCategoryShowInOverview(courseYearID, termID, categoryID int, visible bool) error {
+	showValue := 0
+	if visible {
+		showValue = 1
+	}
+	_, err := a.db.Exec(`
+		INSERT INTO category_grading_policies(course_year_id, term_id, category_id, scheme_key, default_pass_percent, show_in_overview)
+		VALUES (?, ?, ?, 'average', NULL, ?)
+		ON CONFLICT(course_year_id, term_id, category_id) DO UPDATE
+		SET show_in_overview = excluded.show_in_overview`,
+		courseYearID, termID, categoryID, showValue)
+	return err
+}
+
+func (a *App) SetCategoryShowInOverview(value string, visible bool) error {
+	ctx := a.context()
+	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return errors.New("set year, term, and course first")
+	}
+	categoryID, categoryName, err := a.resolveCategoryInteractive(value)
+	if err != nil {
+		return err
+	}
+	if err := a.upsertCategoryShowInOverview(ctx.CourseYearID, ctx.TermID, categoryID, visible); err != nil {
+		return err
+	}
+	state := "hidden"
+	if visible {
+		state = "visible"
+	}
+	fmt.Fprintf(a.out, "Set category overview visibility: %s = %s\n", categoryName, state)
 	return nil
 }
 
@@ -184,10 +233,10 @@ func (a *App) categoryPolicy(courseYearID, termID, categoryID int) (CategoryRule
 		return CategoryRule{}, false, err
 	}
 	err = a.db.QueryRow(`
-		SELECT scheme_key, default_pass_percent
+		SELECT scheme_key, default_pass_percent, show_in_overview
 		FROM category_grading_policies
 		WHERE course_year_id = ? AND term_id = ? AND category_id = ?`, courseYearID, termID, categoryID).
-		Scan(&rule.SchemeKey, &rule.DefaultPassPercent)
+		Scan(&rule.SchemeKey, &rule.DefaultPassPercent, &rule.ShowInOverview)
 	if errors.Is(err, sql.ErrNoRows) {
 		rule.SchemeKey = "average"
 		return rule, false, nil
@@ -224,6 +273,17 @@ func parsePassRateSetting(raw string) (sql.NullFloat64, string, error) {
 	return sql.NullFloat64{Float64: value, Valid: true}, "completion", nil
 }
 
+func parseShowInOverviewSetting(raw string) (bool, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch raw {
+	case "true", "1", "yes", "visible", "show":
+		return true, nil
+	case "false", "0", "no", "hidden", "hide":
+		return false, nil
+	}
+	return false, fmt.Errorf("invalid overview visibility: %s", raw)
+}
+
 func passPercentLabel(value sql.NullFloat64, defaulted bool) string {
 	if !value.Valid {
 		if defaulted {
@@ -249,6 +309,20 @@ func categoryScoringLabel(rule CategoryRule) string {
 	default:
 		return "Raw average"
 	}
+}
+
+func categoryOverviewLabel(rule CategoryRule) string {
+	visible := rule.IsVisibleInOverview()
+	if rule.ShowInOverview.Valid {
+		if visible {
+			return "visible"
+		}
+		return "hidden"
+	}
+	if visible {
+		return "visible (default)"
+	}
+	return "hidden (default)"
 }
 
 func nullablePassRateValue(value sql.NullFloat64) any {
@@ -355,6 +429,15 @@ func (a *App) ImportCategories(file string) error {
 				return err
 			}
 		}
+		if record.ShowInOverview != nil {
+			visible, err := parseShowInOverviewSetting(*record.ShowInOverview)
+			if err != nil {
+				return fmt.Errorf("row %d: %w", rowIndex+2, err)
+			}
+			if err := a.upsertCategoryShowInOverview(ctx.CourseYearID, ctx.TermID, categoryID, visible); err != nil {
+				return err
+			}
+		}
 		imported++
 	}
 	fmt.Fprintf(a.out, "Imported %d category row(s)\n", imported)
@@ -437,8 +520,8 @@ func (a *App) WriteCategorySetupCSV(file string) error {
 
 	writer := csv.NewWriter(f)
 	data := [][]string{
-		{"category", "weight", "scheme", "pass_rate"},
-		{"# example row - importer ignores rows whose first cell starts with #", "40", "completion", "80"},
+		{"category", "weight", "scheme", "pass_rate", "show_in_overview"},
+		{"# example row - importer ignores rows whose first cell starts with #", "40", "completion", "80", "true"},
 	}
 	data = append(data, rows...)
 	for _, row := range data {
@@ -472,21 +555,31 @@ func (a *App) categorySetupRows() ([][]string, error) {
 		if rule.HasWeight {
 			weight = fmt.Sprintf("%.1f", rule.WeightPercent)
 		}
+		showInOverview := ""
+		if rule.ShowInOverview.Valid {
+			if rule.ShowInOverview.Bool {
+				showInOverview = "true"
+			} else {
+				showInOverview = "false"
+			}
+		}
 		out = append(out, []string{
 			rule.CategoryName,
 			weight,
 			rule.SchemeKey,
 			exportPassPercent(rule.DefaultPassPercent),
+			showInOverview,
 		})
 	}
 	return out, nil
 }
 
 type categoryImportRecord struct {
-	Category string
-	Weight   *string
-	Scheme   string
-	PassRate *string
+	Category       string
+	Weight         *string
+	Scheme         string
+	PassRate       *string
+	ShowInOverview *string
 }
 
 func categoryImportRecordFromRow(headers map[string]int, row []string) (categoryImportRecord, error) {
@@ -509,6 +602,12 @@ func categoryImportRecordFromRow(headers map[string]int, row []string) (category
 	}
 	if raw := get("pass_rate"); raw != "" {
 		record.PassRate = &raw
+	}
+	if raw := get("show_in_overview"); raw != "" {
+		record.ShowInOverview = &raw
+	}
+	if raw := get("visible"); raw != "" && record.ShowInOverview == nil {
+		record.ShowInOverview = &raw
 	}
 	return record, nil
 }

@@ -103,7 +103,8 @@ func (a *App) categoryRulesForContext(courseYearID, termID int) ([]CategoryRule,
 		       COALESCE(category_scheme_weights.weight_percent, 0),
 		       category_scheme_weights.weight_percent IS NOT NULL,
 		       COALESCE(category_grading_policies.scheme_key, 'average'),
-		       category_grading_policies.default_pass_percent
+		       category_grading_policies.default_pass_percent,
+		       category_grading_policies.show_in_overview
 		FROM categories
 		LEFT JOIN category_scheme_weights
 		  ON category_scheme_weights.category_id = categories.category_id
@@ -149,7 +150,7 @@ func (a *App) categoryRulesForContext(courseYearID, termID int) ([]CategoryRule,
 	var rules []CategoryRule
 	for rows.Next() {
 		var rule CategoryRule
-		if err := rows.Scan(&rule.CategoryID, &rule.CategoryName, &rule.WeightPercent, &rule.HasWeight, &rule.SchemeKey, &rule.DefaultPassPercent); err != nil {
+		if err := rows.Scan(&rule.CategoryID, &rule.CategoryName, &rule.WeightPercent, &rule.HasWeight, &rule.SchemeKey, &rule.DefaultPassPercent, &rule.ShowInOverview); err != nil {
 			return nil, err
 		}
 		rules = append(rules, rule)
@@ -252,6 +253,57 @@ func (a *App) UndoMarkMissingLate() error {
 		return err
 	}
 	fmt.Fprintf(a.out, "Restored %d late grade(s) back to missing.\n", affected)
+	return nil
+}
+
+func (a *App) MarkZeroRedo() error {
+	ctx := a.context()
+	if ctx.AssignmentID == 0 {
+		return errors.New("set an assignment first")
+	}
+	res, err := a.db.Exec(`
+		UPDATE grades
+		SET flags_bitmask = (flags_bitmask | ?) & ~?
+		WHERE assignment_id = ?
+		  AND score = 0
+		  AND (flags_bitmask & ?) = 0
+		  AND (flags_bitmask & ?) = 0
+		  AND (flags_bitmask & ?) = 0`,
+		flagRedo, flagMissing, ctx.AssignmentID, flagPass, flagRedo, flagLocked0)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Marked %d zero grade(s) as redo.\n", affected)
+	return nil
+}
+
+func (a *App) MarkZeroLate() error {
+	ctx := a.context()
+	if ctx.AssignmentID == 0 {
+		return errors.New("set an assignment first")
+	}
+	res, err := a.db.Exec(`
+		UPDATE grades
+		SET score = NULL,
+		    flags_bitmask = (flags_bitmask | ?) & ~?
+		WHERE assignment_id = ?
+		  AND score = 0
+		  AND (flags_bitmask & ?) = 0
+		  AND (flags_bitmask & ?) = 0
+		  AND (flags_bitmask & ?) = 0`,
+		flagLate, flagMissing, ctx.AssignmentID, flagPass, flagLate, flagLocked0)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Marked %d zero grade(s) as late.\n", affected)
 	return nil
 }
 
@@ -459,6 +511,30 @@ func completionPercent(record GradeRecord, passPercent sql.NullFloat64, anchor, 
 	return score
 }
 
+func effectiveAssignmentPercent(record GradeRecord, passPercent sql.NullFloat64, anchor, lift float64) float64 {
+	if passPercent.Valid && passPercent.Float64 > 0 {
+		return completionPercent(record, passPercent, anchor, lift)
+	}
+	percent := recordPercent(record, anchor, lift)
+	// Scored raw grades and explicit pass grades behave like completion passes:
+	// late and redo each deduct 10%.
+	if record.Flags&flagPass != 0 || (record.Score.Valid && record.Flags&flagMissing == 0) {
+		if record.Flags&flagPass != 0 {
+			percent = 100
+		}
+		if record.Flags&flagRedo != 0 {
+			percent -= 10
+		}
+		if record.Flags&flagLate != 0 {
+			percent -= 10
+		}
+		if percent < 0 {
+			percent = 0
+		}
+	}
+	return percent
+}
+
 func (a *App) ShowCategoryScores() error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
@@ -621,7 +697,7 @@ func calculateCategoryScore(rule CategoryRule, assignments []AssignmentScoreMeta
 				continue
 			}
 			maxTotal += float64(assignment.MaxPoints)
-			sum += (recordPercent(record, assignment.Anchor, assignment.Lift) / 100) * float64(assignment.MaxPoints)
+			sum += (effectiveAssignmentPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift) / 100) * float64(assignment.MaxPoints)
 		}
 		if maxTotal == 0 {
 			return 0, false
@@ -636,7 +712,7 @@ func calculateCategoryScore(rule CategoryRule, assignments []AssignmentScoreMeta
 			if !countsTowardAssignmentAverage(record) {
 				continue
 			}
-			total += recordPercent(record, assignment.Anchor, assignment.Lift)
+			total += effectiveAssignmentPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift)
 			count++
 		}
 		if count == 0 {

@@ -125,6 +125,18 @@ grades clear-redo [student]
 grades clear-cheat [student]
 ```
 
+## Outstanding Work (Without Switching Assignments)
+
+```powershell
+grades make-up list <student>
+grades make-up enter <student>
+grades make-up pass <student>
+grades redo list <student>
+grades redo pass <student>
+```
+
+`make-up` now includes any active redo work as well as late/missing assignments, so `make-up pass` can clear a zero-score redo in one step.
+
 ## Reporting
 
 ```powershell

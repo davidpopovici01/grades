@@ -111,3 +111,31 @@ func TestPortalCategoryScoreCountsMissingLateAndExplicitZero(t *testing.T) {
 		t.Fatalf("expected portal average to include explicit zero, missing, and late as counted zeroes, got %v", score)
 	}
 }
+
+func TestEffectiveAssignmentPercentPassPenalty(t *testing.T) {
+	pass := sql.NullFloat64{Valid: true, Float64: 0}
+	cases := []struct {
+		name    string
+		record  GradeRecord
+		pass    sql.NullFloat64
+		want    float64
+	}{
+		{"pass only", GradeRecord{Flags: flagPass}, pass, 100},
+		{"pass late", GradeRecord{Flags: flagPass | flagLate}, pass, 90},
+		{"pass redo", GradeRecord{Flags: flagPass | flagRedo}, pass, 90},
+		{"pass late redo", GradeRecord{Flags: flagPass | flagLate | flagRedo}, pass, 80},
+		{"raw late", GradeRecord{Score: sql.NullFloat64{Valid: true, Float64: 80}, MaxPoints: 100, Flags: flagLate}, pass, 70},
+		{"raw late 100", GradeRecord{Score: sql.NullFloat64{Valid: true, Float64: 100}, MaxPoints: 100, Flags: flagLate}, pass, 90},
+		{"raw redo", GradeRecord{Score: sql.NullFloat64{Valid: true, Float64: 100}, MaxPoints: 100, Flags: flagRedo}, pass, 90},
+		{"raw late redo", GradeRecord{Score: sql.NullFloat64{Valid: true, Float64: 100}, MaxPoints: 100, Flags: flagLate | flagRedo}, pass, 80},
+		{"completion pass late", GradeRecord{Score: sql.NullFloat64{Valid: true, Float64: 80}, MaxPoints: 100, Flags: flagLate}, sql.NullFloat64{Valid: true, Float64: 70}, 90},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := effectiveAssignmentPercent(tc.record, tc.pass, 100, 1)
+			if got != tc.want {
+				t.Fatalf("effectiveAssignmentPercent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

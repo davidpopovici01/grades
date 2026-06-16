@@ -241,6 +241,113 @@ func portalJSONRequest(t *testing.T, client *http.Client, method, url string, bo
 	return resp.StatusCode
 }
 
+func TestPortalImprovementTipsRespectShowInOverview(t *testing.T) {
+	portalApp, home := newPortalTestApp(t)
+	defer portalApp.Close()
+	conn, err := db.Open(filepath.Join(home, "grades.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := migrate.Up(conn); err != nil {
+		conn.Close()
+		t.Fatalf("migrate: %v", err)
+	}
+	statements := []string{
+		`INSERT INTO terms(term_id, name, start_date, end_date) VALUES (1, 'Fall 2026', '2026-08-15', '2026-12-20')`,
+		`INSERT INTO courses(course_id, name) VALUES (1, 'APCSA')`,
+		`INSERT INTO course_years(course_year_id, course_id, name) VALUES (1, 1, 'APCSA 2026-27')`,
+		`INSERT INTO course_year_terms(course_year_id, term_id) VALUES (1, 1)`,
+		`INSERT INTO sections(section_id, course_year_id, name) VALUES (1, 1, '12A')`,
+		`INSERT INTO categories(category_id, name) VALUES (1, 'Homework'), (2, 'Quiz')`,
+		`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (1, 'Alice', 'Brown', '3001')`,
+		`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 1, 1, '2026-08-15', 'active')`,
+		`INSERT INTO category_schemes(scheme_id, name) VALUES (1, 'Default')`,
+		`INSERT INTO category_scheme_weights(scheme_id, category_id, weight_percent) VALUES (1, 1, 50), (1, 2, 50)`,
+		`UPDATE course_year_terms SET scheme_id = 1 WHERE course_year_id = 1 AND term_id = 1`,
+		`INSERT INTO category_grading_policies(course_year_id, term_id, category_id, scheme_key, default_pass_percent) VALUES (1, 1, 1, 'completion', 80), (1, 1, 2, 'completion', 80)`,
+		`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points, pass_percent) VALUES (1, 1, 1, 1, 'HW1', 10, 80), (2, 1, 1, 2, 'Quiz 1', 10, 80)`,
+		`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count) VALUES (1, 1, 0, 2, 0), (2, 1, 0, 2, 0)`,
+	}
+	for _, stmt := range statements {
+		if _, err := conn.Exec(stmt); err != nil {
+			conn.Close()
+			t.Fatalf("seed stmt failed: %v", err)
+		}
+	}
+	conn.Close()
+
+	portalApp.v.Set("context.year", "2026-27")
+	portalApp.v.Set("context.term_id", 1)
+	portalApp.v.Set("context.course_year_id", 1)
+	if err := portalApp.v.WriteConfig(); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if err := portalApp.PublishStudentPortal(""); err != nil {
+		t.Fatalf("publish portal: %v", err)
+	}
+
+	gradesJSON, err := os.ReadFile(filepath.Join(home, "..", "gradesPublished", "students", "1.json"))
+	if err != nil {
+		t.Fatalf("read grades snapshot: %v", err)
+	}
+	var grades portalStudentSnapshot
+	if err := json.Unmarshal(gradesJSON, &grades); err != nil {
+		t.Fatalf("decode grades snapshot: %v", err)
+	}
+
+	if len(grades.Categories) != 2 {
+		t.Fatalf("expected 2 categories, got %d", len(grades.Categories))
+	}
+	if len(grades.Assignments) != 2 {
+		t.Fatalf("expected 2 assignments, got %d", len(grades.Assignments))
+	}
+
+	// Quiz is hidden from overview by default, Homework is visible.
+	var homeworkVisible, quizVisible bool
+	for _, cat := range grades.Categories {
+		if cat.CategoryName == "Homework" {
+			homeworkVisible = cat.ShowInOverview
+		}
+		if cat.CategoryName == "Quiz" {
+			quizVisible = cat.ShowInOverview
+		}
+	}
+	if !homeworkVisible {
+		t.Fatalf("expected Homework to be visible in overview")
+	}
+	if quizVisible {
+		t.Fatalf("expected Quiz to be hidden from overview by default")
+	}
+
+	for _, a := range grades.Assignments {
+		if a.CategoryName == "Quiz" && a.ShowInOverview {
+			t.Fatalf("expected Quiz assignment to have ShowInOverview false")
+		}
+		if a.CategoryName == "Homework" && !a.ShowInOverview {
+			t.Fatalf("expected Homework assignment to have ShowInOverview true")
+		}
+	}
+
+	// Only the Homework missing assignment should appear in tips.
+	foundHW := false
+	foundQuiz := false
+	for _, tip := range grades.ImprovementTips {
+		if strings.Contains(tip, "HW1") {
+			foundHW = true
+		}
+		if strings.Contains(tip, "Quiz 1") {
+			foundQuiz = true
+		}
+	}
+	if !foundHW {
+		t.Fatalf("expected improvement tip for HW1")
+	}
+	if foundQuiz {
+		t.Fatalf("did not expect improvement tip for Quiz 1")
+	}
+}
+
 func portalFixedNow() time.Time {
 	return time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 }

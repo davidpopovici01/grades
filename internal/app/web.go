@@ -55,6 +55,7 @@ type portalCategorySnapshot struct {
 	SchemeKey          string  `json:"schemeKey"`
 	DefaultPassPercent float64 `json:"defaultPassPercent,omitempty"`
 	Included           bool    `json:"included"`
+	ShowInOverview     bool    `json:"showInOverview"`
 }
 
 type portalAssignmentSnapshot struct {
@@ -72,6 +73,7 @@ type portalAssignmentSnapshot struct {
 	IsBeforeCutoff      bool     `json:"isBeforeCutoff"`
 	CurrentPercent      float64  `json:"currentPercent"`
 	CurrentPercentLabel string   `json:"currentPercentLabel"`
+	ShowInOverview      bool     `json:"showInOverview"`
 }
 
 type portalCourseSnapshot struct {
@@ -526,6 +528,10 @@ func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYear
 		return portalStudentSnapshot{}, err
 	}
 	categorySnapshots, weightedTotal, weightedLabel, activeCategoryCount := portalCategorySnapshots(rules, details)
+	showInOverviewByCategory := map[int]bool{}
+	for _, rule := range rules {
+		showInOverviewByCategory[rule.CategoryID] = rule.IsVisibleInOverview()
+	}
 	username, _ := a.studentPortalUsername(student.ID)
 	item := portalStudentSnapshot{
 		StudentID:                  student.ID,
@@ -557,10 +563,7 @@ func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYear
 			value := detail.Grade.PassPercent.Float64
 			passPercent = &value
 		}
-		currentPercent := recordPercent(detail.Grade, detail.Anchor, detail.Lift)
-		if detail.SchemeKey == "completion" {
-			currentPercent = completionPercent(detail.Grade, detail.Grade.PassPercent, detail.Anchor, detail.Lift)
-		}
+		currentPercent := effectiveAssignmentPercent(detail.Grade, detail.Grade.PassPercent, detail.Anchor, detail.Lift)
 		item.Assignments = append(item.Assignments, portalAssignmentSnapshot{
 			AssignmentID:        detail.AssignmentID,
 			Title:               detail.Title,
@@ -576,6 +579,7 @@ func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYear
 			IsBeforeCutoff:      cutoff > 0 && detail.AssignmentID <= cutoff,
 			CurrentPercent:      currentPercent,
 			CurrentPercentLabel: fmt.Sprintf("%.1f%%", currentPercent),
+			ShowInOverview:      showInOverviewByCategory[detail.CategoryID],
 		})
 	}
 	item.ImprovementTips = portalImprovementTips(item.Assignments, item.Categories, cutoff)
@@ -656,6 +660,7 @@ func portalCategorySnapshots(rules []CategoryRule, details []portalAssignmentDet
 			SchemeKey:          rule.SchemeKey,
 			DefaultPassPercent: passPercent,
 			Included:           included,
+			ShowInOverview:     rule.IsVisibleInOverview(),
 		})
 	}
 	weightedLabel := ""
@@ -682,7 +687,7 @@ func portalCategoryScore(rule CategoryRule, items []portalAssignmentDetail) (flo
 			if !countsTowardAssignmentAverage(item.Grade) {
 				continue
 			}
-			total += completionPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift)
+			total += effectiveAssignmentPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift)
 			count++
 		}
 		if !hasEntry || count == 0 {
@@ -700,7 +705,7 @@ func portalCategoryScore(rule CategoryRule, items []portalAssignmentDetail) (flo
 				continue
 			}
 			maxTotal += float64(item.Grade.MaxPoints)
-			sum += (recordPercent(item.Grade, item.Anchor, item.Lift) / 100) * float64(item.Grade.MaxPoints)
+			sum += (effectiveAssignmentPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift) / 100) * float64(item.Grade.MaxPoints)
 		}
 		if !hasEntry || maxTotal == 0 {
 			return 0, false
@@ -719,7 +724,7 @@ func portalCategoryScore(rule CategoryRule, items []portalAssignmentDetail) (flo
 			if !countsTowardAssignmentAverage(item.Grade) {
 				continue
 			}
-			total += recordPercent(item.Grade, item.Anchor, item.Lift)
+			total += effectiveAssignmentPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift)
 			count++
 		}
 		if !hasEntry || count == 0 {
@@ -740,6 +745,10 @@ func portalImprovementTips(assignments []portalAssignmentSnapshot, categories []
 		if cutoff > 0 && item.AssignmentID <= cutoff {
 			continue
 		}
+		// Skip assignments in categories hidden from the overview.
+		if !item.ShowInOverview {
+			continue
+		}
 		if containsFlag(item.Flags, "missing") {
 			tips = append(tips, "Finish missing work: "+item.Title)
 		} else if containsFlag(item.Flags, "redo") {
@@ -749,6 +758,9 @@ func portalImprovementTips(assignments []portalAssignmentSnapshot, categories []
 	var lowest *portalCategorySnapshot
 	for idx := range categories {
 		if !categories[idx].Included {
+			continue
+		}
+		if !categories[idx].ShowInOverview {
 			continue
 		}
 		if lowest == nil || categories[idx].Score < lowest.Score {

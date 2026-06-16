@@ -72,6 +72,7 @@ type CategoryRule struct {
 	HasWeight          bool
 	SchemeKey          string
 	DefaultPassPercent sql.NullFloat64
+	ShowInOverview     sql.NullBool
 }
 
 type GradingSchemeDefinition struct {

@@ -20,12 +20,20 @@ Examples:
 - Tests
 - Projects
 - Major assessments
+- Classwork
 
 These categories normally use:
 
 ```text
 pass_rate = raw
 ```
+
+Scored raw grades also receive the standard penalties:
+
+- `late` subtracts `10%`
+- `redo` subtracts `10%`
+
+For example, a `100%` raw score marked late counts as `90%` in averages, category totals, the portal, and exports.
 
 ## Completion / Pass-Rate Categories
 

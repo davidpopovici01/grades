@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/davidpopovici01/grades/internal/app"
@@ -56,6 +57,8 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		newMakeupCmd(gradesApp),
 		newFillCmd(gradesApp),
 		newMarkLateCmd(gradesApp),
+		newMarkZeroRedoCmd(gradesApp),
+		newMarkZeroLateCmd(gradesApp),
 		newClearLateCmd(gradesApp),
 		newClearRedoCmd(gradesApp),
 		newClearCheatCmd(gradesApp),
@@ -414,6 +417,34 @@ func newCategoriesCmd(a *app.App) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
+		Use:   "show <category>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Show a category in the overview",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.SetCategoryShowInOverview(args[0], true)
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "hide <category>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Hide a category from the overview",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.SetCategoryShowInOverview(args[0], false)
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "set-visibility <category> <true|false>",
+		Args:  cobra.ExactArgs(2),
+		Short: "Set whether a category is visible in the overview",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			visible, err := strconv.ParseBool(args[1])
+			if err != nil {
+				return fmt.Errorf("visibility must be true or false: %w", err)
+			}
+			return a.SetCategoryShowInOverview(args[0], visible)
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
 		Use:   "import [file]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Import category weights, schemes, and pass rates from CSV",
@@ -599,6 +630,8 @@ func newGradesCmd(a *app.App) *cobra.Command {
 		newMakeupCmd(a),
 		newFillCmd(a),
 		newMarkLateCmd(a),
+		newMarkZeroRedoCmd(a),
+		newMarkZeroLateCmd(a),
 		newClearLateCmd(a),
 		newClearRedoCmd(a),
 		newClearCheatCmd(a),
@@ -678,13 +711,13 @@ func newRedoCmd(a *app.App) *cobra.Command {
 func newMakeupCmd(a *app.App) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "make-up",
-		Short: "List or record late/missing make-up work for a student without switching assignments",
+		Short: "List or record outstanding late/missing/redo work for a student without switching assignments",
 		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 	cmd.AddCommand(&cobra.Command{
 		Use:   "list <student>",
 		Args:  cobra.ArbitraryArgs,
-		Short: "List active late/missing make-up assignments for a student",
+		Short: "List active late/missing/redo assignments for a student",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.ListStudentMakeup(strings.Join(args, " "))
 		},
@@ -692,7 +725,7 @@ func newMakeupCmd(a *app.App) *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use:   "enter <student>",
 		Args:  cobra.ArbitraryArgs,
-		Short: "Record a score for one late/missing make-up assignment",
+		Short: "Record a score for one late/missing/redo assignment",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.EnterStudentMakeup(strings.Join(args, " "))
 		},
@@ -700,7 +733,7 @@ func newMakeupCmd(a *app.App) *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use:   "pass <student>",
 		Args:  cobra.ArbitraryArgs,
-		Short: "Mark one late/missing make-up assignment as pass",
+		Short: "Mark one late/missing/redo assignment as pass",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.PassStudentMakeup(strings.Join(args, " "))
 		},
@@ -773,6 +806,28 @@ func newClearCheatCmd(a *app.App) *cobra.Command {
 		Short: "Clear the cheat flag for a student on the active assignment",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.ClearCheat(strings.Join(args, " "))
+		},
+	}
+}
+
+func newMarkZeroRedoCmd(a *app.App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "mark-zero-redo",
+		Args:  cobra.NoArgs,
+		Short: "Mark all zero scores for the active assignment as redo",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.MarkZeroRedo()
+		},
+	}
+}
+
+func newMarkZeroLateCmd(a *app.App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "mark-zero-late",
+		Args:  cobra.NoArgs,
+		Short: "Mark all zero scores for the active assignment as late",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.MarkZeroLate()
 		},
 	}
 }

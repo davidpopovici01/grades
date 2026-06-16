@@ -44,6 +44,20 @@ function completionPercent(item) {
   return Math.max(out, 0);
 }
 
+function effectiveAssignmentPercent(item) {
+  if (item.passPercent > 0) {
+    return completionPercent(item);
+  }
+  let percent = recordPercent(item);
+  if (item.flags?.includes('pass')) {
+    percent = 100;
+    if (item.flags?.includes('redo')) percent -= 10;
+    if (item.flags?.includes('late')) percent -= 10;
+    percent = Math.max(percent, 0);
+  }
+  return percent;
+}
+
 function computeCategoryScore(items, schemeKey) {
   let hasEntry = false;
 
@@ -55,7 +69,7 @@ function computeCategoryScore(items, schemeKey) {
       for (const item of items) {
         if (assignmentHasEntry(item)) hasEntry = true;
         if (!countsTowardAverage(item)) continue;
-        total += completionPercent(item);
+        total += effectiveAssignmentPercent(item);
         count++;
       }
       if (!hasEntry || count === 0) return null;
@@ -68,7 +82,7 @@ function computeCategoryScore(items, schemeKey) {
         if (assignmentHasEntry(item)) hasEntry = true;
         if (!countsTowardAverage(item)) continue;
         maxTotal += item.maxPoints;
-        sum += (recordPercent(item) / 100) * item.maxPoints;
+        sum += (effectiveAssignmentPercent(item) / 100) * item.maxPoints;
       }
       if (!hasEntry || maxTotal === 0) return null;
       return (sum / maxTotal) * 100;
@@ -80,7 +94,7 @@ function computeCategoryScore(items, schemeKey) {
       for (const item of items) {
         if (assignmentHasEntry(item)) hasEntry = true;
         if (!countsTowardAverage(item)) continue;
-        total += recordPercent(item);
+        total += effectiveAssignmentPercent(item);
         count++;
       }
       if (!hasEntry || count === 0) return null;

@@ -508,11 +508,14 @@ func (a *App) studentStatusGroups(students []Student, cutoff int) (map[int][]str
 		       grades.score,
 		       COALESCE(grades.flags_bitmask, 0),
 		       assignments.max_points,
-		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent)
+		       COALESCE(assignments.pass_percent, category_grading_policies.default_pass_percent),
+		       categories.name,
+		       category_grading_policies.show_in_overview
 		FROM assignments
 		JOIN section_enrollments ON section_enrollments.term_id = assignments.term_id
 		JOIN sections ON sections.section_id = section_enrollments.section_id
 		JOIN students ON students.student_pk = section_enrollments.student_pk
+		JOIN categories ON categories.category_id = assignments.category_id
 		LEFT JOIN grades ON grades.assignment_id = assignments.assignment_id AND grades.student_pk = students.student_pk
 		LEFT JOIN category_grading_policies
 		  ON category_grading_policies.course_year_id = assignments.course_year_id
@@ -533,13 +536,18 @@ func (a *App) studentStatusGroups(students []Student, cutoff int) (map[int][]str
 	statuses := map[int]*studentOverview{}
 	for rows.Next() {
 		var studentID, assignmentID, flags, maxPoints int
-		var title string
+		var title, categoryName string
 		var score sql.NullFloat64
 		var passPercent sql.NullFloat64
-		if err := rows.Scan(&studentID, &assignmentID, &title, &score, &flags, &maxPoints, &passPercent); err != nil {
+		var showInOverview sql.NullBool
+		if err := rows.Scan(&studentID, &assignmentID, &title, &score, &flags, &maxPoints, &passPercent, &categoryName, &showInOverview); err != nil {
 			return nil, err
 		}
 		_ = assignmentID
+		rule := CategoryRule{CategoryName: categoryName, ShowInOverview: showInOverview}
+		if !rule.IsVisibleInOverview() {
+			continue
+		}
 		if _, ok := statuses[studentID]; !ok {
 			statuses[studentID] = &studentOverview{}
 		}
@@ -903,9 +911,6 @@ func (a *App) saveGrade(assignmentID, studentID int, entry gradeEntry, prev *Gra
 	if redoEligible && prev != nil && prev.Flags&flagRedo != 0 && !entry.ClearRedo && entry.Flags&flagRedo == 0 {
 		entry.Flags |= flagRedo
 	}
-	if !redoEligible {
-		entry.Flags &^= flagRedo
-	}
 	if redoEligible && score.Valid && entry.Flags&(flagMissing|flagPass|flagLocked0) == 0 && maxPoints > 0 &&
 		score.Float64/maxPoints < meta.PassPercent.Float64/100 {
 		entry.Flags |= flagRedo
@@ -955,7 +960,11 @@ func (a *App) ClearCheat(studentID string) error {
 }
 
 func (a *App) PassStudent(studentID string) error {
-	return a.applyGradeEntryToStudent(studentID, gradeEntry{Flags: flagPass}, "pass")
+	err := a.applyGradeEntryToStudent(studentID, gradeEntry{Flags: flagPass}, "pass")
+	if err != nil && strings.Contains(err.Error(), "set year, term, course, and assignment first") {
+		return errors.New("set an assignment first, or use `grades make-up pass <student>` / `grades redo pass <student>` to choose from outstanding work")
+	}
+	return err
 }
 
 func (a *App) ListStudentRedo(studentID string) error {
@@ -1031,7 +1040,7 @@ func (a *App) EnterStudentMakeup(studentID string) error {
 		return err
 	}
 	for {
-		scoreRaw, err := a.prompt("Score")
+		scoreRaw, err := a.prompt(fmt.Sprintf("Score (max %d)", assignment.Record.MaxPoints))
 		if err != nil {
 			return err
 		}
@@ -1040,6 +1049,7 @@ func (a *App) EnterStudentMakeup(studentID string) error {
 			fmt.Fprintln(a.out, retryMessage(err.Error()))
 			continue
 		}
+		entry.ClearRedo = true
 		prev, err := a.currentGrade(assignment.ID, student.ID)
 		if err != nil {
 			return err
@@ -1250,7 +1260,7 @@ func (a *App) makeupAssignmentsForStudent(studentID string) (Student, []makeupAs
 			return Student{}, nil, "", err
 		}
 		item.Record.PassPercent = passPercent
-		if needsMakeup(item.Record) {
+		if needsMakeup(item.Record) || hasPendingRedo(item.Record, passPercent) {
 			assignments = append(assignments, item)
 		}
 	}
@@ -1272,8 +1282,9 @@ func needsMakeup(record GradeRecord) bool {
 
 func (a *App) chooseMakeupAssignment(student Student, assignments []makeupAssignment) (makeupAssignment, error) {
 	fmt.Fprintf(a.out, "Make-up assignments for %s %s\n", student.FirstName, student.LastName)
+	fmt.Fprintln(a.out, "#\tTitle\tCategory\tMax\tGrade")
 	for idx, item := range assignments {
-		fmt.Fprintf(a.out, "%d\t%s\t%s\t%s\n", idx+1, item.Title, item.Category, displayGradePlain(item.Record))
+		fmt.Fprintf(a.out, "%d\t%s\t%s\t%d\t%s\n", idx+1, item.Title, item.Category, item.Record.MaxPoints, displayGradePlain(item.Record))
 	}
 	choice, err := a.promptRedoAssignmentChoice(len(assignments))
 	if err != nil {
@@ -1525,10 +1536,7 @@ func hasPassRate(passPercent sql.NullFloat64) bool {
 func assignmentCountsAsPercent(record GradeRecord, meta assignmentDisplayMeta) float64 {
 	record.MaxPoints = meta.MaxPoints
 	record.PassPercent = meta.PassPercent
-	if hasPassRate(meta.PassPercent) {
-		return completionPercent(record, meta.PassPercent, meta.Anchor, meta.Lift)
-	}
-	return recordPercent(record, meta.Anchor, meta.Lift)
+	return effectiveAssignmentPercent(record, meta.PassPercent, meta.Anchor, meta.Lift)
 }
 
 func assignmentCountsAsLabel(record GradeRecord, meta assignmentDisplayMeta) string {

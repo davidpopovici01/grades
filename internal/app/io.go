@@ -576,11 +576,8 @@ func powerschoolExportScore(record GradeRecord, schemeKey, status string, anchor
 	if !strings.EqualFold(status, "active") {
 		return ""
 	}
-	if schemeKey == "completion" {
-		effective := completionPercent(record, record.PassPercent, anchor, lift)
-		return strconv.FormatFloat(effective, 'f', 2, 64)
-	}
-	return strconv.FormatFloat(recordPercent(record, anchor, lift), 'f', 2, 64)
+	effective := effectiveAssignmentPercent(record, record.PassPercent, anchor, lift)
+	return strconv.FormatFloat(effective, 'f', 2, 64)
 }
 
 func (a *App) pendingAssignmentsForExport(termID, courseYearID int) ([]pendingAssignmentExport, error) {

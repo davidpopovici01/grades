@@ -296,12 +296,7 @@ func (a *App) studentAssignmentDetails(studentID int) ([]studentAssignmentDetail
 }
 
 func assignmentCountsAs(detail studentAssignmentDetail) string {
-	switch detail.SchemeKey {
-	case "completion":
-		return fmt.Sprintf("%.1f%%", completionPercent(detail.Grade, detail.Grade.PassPercent, detail.Anchor, detail.Lift))
-	default:
-		return fmt.Sprintf("%.1f%%", recordPercent(detail.Grade, detail.Anchor, detail.Lift))
-	}
+	return fmt.Sprintf("%.1f%%", effectiveAssignmentPercent(detail.Grade, detail.Grade.PassPercent, detail.Anchor, detail.Lift))
 }
 
 func studentVisibleFlags(record GradeRecord) []string {
@@ -317,6 +312,9 @@ func studentVisibleFlags(record GradeRecord) []string {
 	}
 	if record.Flags&flagMissing != 0 {
 		flags = append(flags, "missing")
+	}
+	if record.Flags&flagPass != 0 {
+		flags = append(flags, "pass")
 	}
 	return flags
 }
