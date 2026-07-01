@@ -20,9 +20,26 @@ func Execute() {
 	}
 }
 
+func extractClassFlag(args []string) string {
+	for i, arg := range args {
+		if arg == "--class" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(arg, "--class=") {
+			return strings.TrimPrefix(arg, "--class=")
+		}
+	}
+	return ""
+}
+
 // NewRootCmd constructs the CLI with injectable IO for tests.
 func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
-	gradesApp, err := app.New(in, out, errOut)
+	return NewRootCmdWithClass(in, out, errOut, extractClassFlag(os.Args[1:]))
+}
+
+// NewRootCmdWithClass constructs the CLI with an explicit course class/profile.
+func NewRootCmdWithClass(in io.Reader, out, errOut io.Writer, className string) *cobra.Command {
+	gradesApp, err := app.NewWithClass(in, out, errOut, className)
 	cobra.CheckErr(err)
 	cobra.OnFinalize(func() {
 		_ = gradesApp.Close()
@@ -40,6 +57,8 @@ func NewRootCmd(in io.Reader, out, errOut io.Writer) *cobra.Command {
 	}
 	rootCmd.SetOut(out)
 	rootCmd.SetErr(errOut)
+
+	rootCmd.PersistentFlags().String("class", "", "Use the saved context for a specific course (also set via GRADES_CONTEXT)")
 
 	rootCmd.AddCommand(
 		newSetupCmd(gradesApp),
@@ -213,8 +232,30 @@ func newContextCmd(a *app.App) *cobra.Command {
 		Short: "Manage active year, term, course, section, and assignment context",
 		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	cmd.AddCommand(newUseCmd(a), newClearCmd(a), newListCmd(a))
+	cmd.AddCommand(newUseCmd(a), newClearCmd(a), newListCmd(a), newProfilesCmd(a), newForgetProfileCmd(a))
 	return cmd
+}
+
+func newProfilesCmd(a *app.App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "profiles",
+		Args:  cobra.NoArgs,
+		Short: "List saved course context profiles",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.ListContextProfiles()
+		},
+	}
+}
+
+func newForgetProfileCmd(a *app.App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "forget <course>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Delete a saved course context profile",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.ForgetContextProfile(args[0])
+		},
+	}
 }
 
 func newClearCmd(a *app.App) *cobra.Command {

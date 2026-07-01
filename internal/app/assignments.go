@@ -87,8 +87,8 @@ func (a *App) AddAssignmentInteractive() error {
 	if err := a.ensureDefaultGradesForAssignment(int(id), ctx.CourseYearID, ctx.TermID); err != nil {
 		return err
 	}
-	a.v.Set("context.assignment_id", int(id))
-	if err := a.v.WriteConfig(); err != nil {
+	a.setContext("context.assignment_id", int(id))
+	if err := a.writeContextConfig(); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.out, "Added assignment %d: %s\n", id, title)
@@ -250,8 +250,8 @@ func (a *App) DeleteAssignment(idRaw string) error {
 		return fmt.Errorf("assignment not found: %d", id)
 	}
 	if a.context().AssignmentID == id {
-		a.v.Set("context.assignment_id", 0)
-		if err := a.v.WriteConfig(); err != nil {
+		a.setContext("context.assignment_id", 0)
+		if err := a.writeContextConfig(); err != nil {
 			return err
 		}
 	}

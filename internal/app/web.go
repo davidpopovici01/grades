@@ -508,16 +508,16 @@ func (a *App) buildPortalCourseSnapshot(courseYearID, termID int) (portalCourseS
 func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYearID, termID int, student Student, rules []CategoryRule, cutoff int) (portalStudentSnapshot, error) {
 	ctx := a.context()
 	defer func(previous Context) {
-		a.v.Set("context.year", previous.Year)
-		a.v.Set("context.term_id", previous.TermID)
-		a.v.Set("context.course_year_id", previous.CourseYearID)
-		a.v.Set("context.section_id", previous.SectionID)
-		a.v.Set("context.assignment_id", previous.AssignmentID)
+		a.setContext("context.year", previous.Year)
+		a.setContext("context.term_id", previous.TermID)
+		a.setContext("context.course_year_id", previous.CourseYearID)
+		a.setContext("context.section_id", previous.SectionID)
+		a.setContext("context.assignment_id", previous.AssignmentID)
 	}(ctx)
-	a.v.Set("context.term_id", termID)
-	a.v.Set("context.course_year_id", courseYearID)
-	a.v.Set("context.section_id", 0)
-	a.v.Set("context.assignment_id", 0)
+	a.setContext("context.term_id", termID)
+	a.setContext("context.course_year_id", courseYearID)
+	a.setContext("context.section_id", 0)
+	a.setContext("context.assignment_id", 0)
 
 	details, err := a.portalAssignmentDetails(student.ID)
 	if err != nil {

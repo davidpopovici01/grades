@@ -40,6 +40,9 @@ var overviewCutoffSQL string
 //go:embed sql/012_category_overview_visibility.sql
 var categoryOverviewVisibilitySQL string
 
+//go:embed sql/013_assignment_export_rows.sql
+var assignmentExportRowsSQL string
+
 type migration struct {
 	version string
 	sql     string
@@ -57,6 +60,7 @@ var migrations = []migration{
 	{version: "009_submission_kind", sql: submissionKindSQL},
 	{version: "010_overview_cutoff", sql: overviewCutoffSQL},
 	{version: "012_category_overview_visibility", sql: categoryOverviewVisibilitySQL},
+	{version: "013_assignment_export_rows", sql: assignmentExportRowsSQL},
 }
 
 func Up(db *sql.DB) error {

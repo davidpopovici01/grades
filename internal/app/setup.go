@@ -117,16 +117,24 @@ func (a *App) RunSetupWizard() error {
 		}
 	}
 
-	a.v.Set("context.term_id", termIDs[0])
-	a.v.Set("context.year", yearLabel)
-	a.v.Set("context.course_year_id", courseYearID)
-	a.v.Set("context.section_id", firstSectionID)
-	a.v.Set("context.assignment_id", 0)
+	baseName := baseCourseName(courseYearName)
+	a.v.Set("context.current_course", baseName)
 	if err := a.v.WriteConfig(); err != nil {
 		return err
 	}
+	if err := a.loadProfile(baseName); err != nil {
+		return err
+	}
+	a.setContext("context.term_id", termIDs[0])
+	a.setContext("context.year", yearLabel)
+	a.setContext("context.course_year_id", courseYearID)
+	a.setContext("context.section_id", firstSectionID)
+	a.setContext("context.assignment_id", 0)
+	if err := a.writeContextConfig(); err != nil {
+		return err
+	}
 
-	fmt.Fprintf(a.out, "Created course: %s\n", baseCourseName(courseYearName))
+	fmt.Fprintf(a.out, "Created course: %s\n", baseName)
 	fmt.Fprintf(a.out, "Using year: %s\n", yearLabel)
 	fmt.Fprintf(a.out, "Created %d term(s) and %d section(s)\n", termCount, sectionCount)
 	if termCount > 0 {

@@ -36,13 +36,20 @@ func (a *App) ResetDB() error {
 }
 
 func (a *App) resetContextState(message string) error {
-	a.v.Set("context.term_id", 0)
-	a.v.Set("context.course_year_id", 0)
-	a.v.Set("context.section_id", 0)
-	a.v.Set("context.assignment_id", 0)
+	a.setContext("context.term_id", 0)
+	a.setContext("context.course_year_id", 0)
+	a.setContext("context.section_id", 0)
+	a.setContext("context.assignment_id", 0)
+	if err := a.writeContextConfig(); err != nil {
+		return err
+	}
+	a.v.Set("context.current_course", "")
 	if err := a.v.WriteConfig(); err != nil {
 		return err
 	}
+	a.profileName = ""
+	a.profileViper = nil
+	a.profilePath = ""
 	fmt.Fprintln(a.out, message)
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -390,6 +391,12 @@ func (a *App) exportAssignmentByID(assignmentID, termID, courseYearID int, file 
 	}
 	fmt.Fprintf(a.out, "Exported grades to %s\n", file)
 
+	previousRows, err := a.loadAssignmentExportRows(assignmentID)
+	if err != nil {
+		return err
+	}
+	a.printExportDiff(document.Rows, previousRows)
+
 	ok, err := a.promptYesNo("Was the export successful?", false)
 	if err != nil {
 		return err
@@ -398,7 +405,7 @@ func (a *App) exportAssignmentByID(assignmentID, termID, courseYearID int, file 
 		fmt.Fprintln(a.out, colorOrange("Export not confirmed. This assignment still needs export."))
 		return errExportNotConfirmed
 	}
-	if err := a.recordAssignmentExport(assignmentID, document.StableHash, file); err != nil {
+	if err := a.recordAssignmentExport(assignmentID, document.StableHash, file, document.Rows); err != nil {
 		return err
 	}
 	fmt.Fprintln(a.out, colorGreen("Marked assignment as exported."))
@@ -637,16 +644,78 @@ func (a *App) assignmentNeedsExport(assignmentID int, currentHash string) (bool,
 	return storedHash != currentHash, true, nil
 }
 
-func (a *App) recordAssignmentExport(assignmentID int, exportHash, exportPath string) error {
-	_, err := a.db.Exec(`
-		INSERT INTO assignment_exports(assignment_id, export_hash, export_path, exported_at)
-		VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+func (a *App) recordAssignmentExport(assignmentID int, exportHash, exportPath string, rows []assignmentExportRow) error {
+	rowsJSON, err := json.Marshal(assignmentExportRowsMap(rows))
+	if err != nil {
+		return err
+	}
+	_, err = a.db.Exec(`
+		INSERT INTO assignment_exports(assignment_id, export_hash, export_path, export_rows_json, exported_at)
+		VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		ON CONFLICT(assignment_id) DO UPDATE SET
 			export_hash = excluded.export_hash,
 			export_path = excluded.export_path,
+			export_rows_json = excluded.export_rows_json,
 			exported_at = excluded.exported_at`,
-		assignmentID, exportHash, exportPath)
+		assignmentID, exportHash, exportPath, string(rowsJSON))
 	return err
+}
+
+func assignmentExportRowsMap(rows []assignmentExportRow) map[string]string {
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		out[assignmentExportRowKey(row)] = row.Score
+	}
+	return out
+}
+
+func assignmentExportRowKey(row assignmentExportRow) string {
+	if row.PowerSchoolNum != "" {
+		return row.PowerSchoolNum
+	}
+	return row.StudentName
+}
+
+func (a *App) loadAssignmentExportRows(assignmentID int) (map[string]string, error) {
+	var rowsJSON sql.NullString
+	err := a.db.QueryRow(`SELECT export_rows_json FROM assignment_exports WHERE assignment_id = ?`, assignmentID).Scan(&rowsJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !rowsJSON.Valid || strings.TrimSpace(rowsJSON.String) == "" {
+		return map[string]string{}, nil
+	}
+	var previous map[string]string
+	if err := json.Unmarshal([]byte(rowsJSON.String), &previous); err != nil {
+		return nil, err
+	}
+	return previous, nil
+}
+
+func (a *App) printExportDiff(rows []assignmentExportRow, previous map[string]string) {
+	if len(rows) == 0 {
+		return
+	}
+	nameWidth := 0
+	scoreWidth := 0
+	for _, row := range rows {
+		nameWidth = max(nameWidth, visibleWidth(row.StudentName))
+		scoreWidth = max(scoreWidth, visibleWidth(row.Score))
+	}
+	fmt.Fprintln(a.out)
+	fmt.Fprintln(a.out, "Exported grades:")
+	for _, row := range rows {
+		score := row.Score
+		if prev, ok := previous[assignmentExportRowKey(row)]; !ok || prev != score {
+			score = colorGreen(score)
+		}
+		fmt.Fprintf(a.out, "%s  %s\n",
+			padVisibleRight(row.StudentName, nameWidth),
+			padVisibleRight(score, scoreWidth))
+	}
 }
 
 func (a *App) defaultAssignmentExportPath(title string) (string, error) {

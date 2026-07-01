@@ -27,6 +27,45 @@ grades context use section 12A
 grades context use assignment HW1
 ```
 
+### Multiple Classes
+
+If you teach more than one class, each course keeps its own saved context. When you switch courses, the previous course's section and assignment are remembered and the new course's last-used context is restored automatically.
+
+```powershell
+grades context use course APCSA
+grades context use section 12A
+grades context use assignment HW1
+# APCSA's context is saved automatically
+
+grades context use course APCSP
+# APCSP's last section/assignment are restored
+```
+
+Saved profiles live in `~/.grades/contexts/<Course>.yaml`. Shared settings such as portal configuration stay in `~/.grades/config.yaml`.
+
+You can list and clean up profiles:
+
+```powershell
+grades context profiles
+grades context forget APCSP
+```
+
+For even faster switching, create shell aliases that pre-load a class:
+
+```powershell
+# PowerShell
+function ga { grades --class APCSA @args }
+function gp { grades --class APCSP @args }
+```
+
+```bash
+# Bash / zsh
+alias ga='grades --class APCSA'
+alias gp='grades --class APCSP'
+```
+
+Then `ga enter`, `gp show`, etc. work exactly like `grades` but start in the right class. You can also set the `GRADES_CONTEXT` environment variable instead of `--class`.
+
 ## 2. Set Up The Class
 
 ### Guided Setup

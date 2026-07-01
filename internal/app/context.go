@@ -4,6 +4,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -55,11 +58,11 @@ func (a *App) UseYear(value string) error {
 	if err != nil {
 		return err
 	}
-	a.v.Set("context.year", selected)
-	a.v.Set("context.course_year_id", 0)
-	a.v.Set("context.section_id", 0)
-	a.v.Set("context.assignment_id", 0)
-	if err := a.v.WriteConfig(); err != nil {
+	a.setContext("context.year", selected)
+	a.setContext("context.course_year_id", 0)
+	a.setContext("context.section_id", 0)
+	a.setContext("context.assignment_id", 0)
+	if err := a.writeContextConfig(); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.out, "Using year: %s\n", selected)
@@ -71,11 +74,11 @@ func (a *App) UseTerm(name string) error {
 	if err != nil {
 		return err
 	}
-	a.v.Set("context.term_id", id)
-	a.v.Set("context.course_year_id", 0)
-	a.v.Set("context.section_id", 0)
-	a.v.Set("context.assignment_id", 0)
-	if err := a.v.WriteConfig(); err != nil {
+	a.setContext("context.term_id", id)
+	a.setContext("context.course_year_id", 0)
+	a.setContext("context.section_id", 0)
+	a.setContext("context.assignment_id", 0)
+	if err := a.writeContextConfig(); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.out, "Using term: %s\n", display)
@@ -91,14 +94,43 @@ func (a *App) UseCourseYear(name string) error {
 	if err != nil {
 		return err
 	}
-	a.v.Set("context.year", courseYearLabel(display))
-	a.v.Set("context.course_year_id", id)
-	a.v.Set("context.section_id", 0)
-	a.v.Set("context.assignment_id", 0)
+
+	baseName := baseCourseName(display)
+
+	// If already in a profile, save its current state before switching.
+	if a.profileViper != nil {
+		if err := a.saveCurrentProfile(); err != nil {
+			return err
+		}
+	}
+
+	// Update the current course pointer in the main config.
+	a.v.Set("context.current_course", baseName)
 	if err := a.v.WriteConfig(); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(a.out, "Using course: %s\n", baseCourseName(display))
+
+	// Load or create the profile for the new course.
+	if err := a.loadProfile(baseName); err != nil {
+		return err
+	}
+
+	// Carry over year/term from the previous context if the profile is new.
+	if a.profileViper.GetInt("context.term_id") == 0 {
+		a.profileViper.Set("context.term_id", ctx.TermID)
+	}
+	if a.profileViper.GetString("context.year") == "" {
+		a.profileViper.Set("context.year", ctx.Year)
+	}
+
+	a.setContext("context.year", courseYearLabel(display))
+	a.setContext("context.course_year_id", id)
+	a.setContext("context.section_id", 0)
+	a.setContext("context.assignment_id", 0)
+	if err := a.writeContextConfig(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.out, "Using course: %s\n", baseName)
 	return nil
 }
 
@@ -111,8 +143,8 @@ func (a *App) UseSection(name string) error {
 	if err != nil {
 		return err
 	}
-	a.v.Set("context.section_id", id)
-	if err := a.v.WriteConfig(); err != nil {
+	a.setContext("context.section_id", id)
+	if err := a.writeContextConfig(); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.out, "Using section: %s\n", display)
@@ -128,8 +160,8 @@ func (a *App) UseAssignment(title string) error {
 	if err != nil {
 		return err
 	}
-	a.v.Set("context.assignment_id", id)
-	if err := a.v.WriteConfig(); err != nil {
+	a.setContext("context.assignment_id", id)
+	if err := a.writeContextConfig(); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.out, "Using assignment: %s\n", display)
@@ -139,27 +171,27 @@ func (a *App) UseAssignment(title string) error {
 func (a *App) ClearScope(scope string) error {
 	switch scope {
 	case "year":
-		a.v.Set("context.year", "")
-		a.v.Set("context.course_year_id", 0)
-		a.v.Set("context.section_id", 0)
-		a.v.Set("context.assignment_id", 0)
+		a.setContext("context.year", "")
+		a.setContext("context.course_year_id", 0)
+		a.setContext("context.section_id", 0)
+		a.setContext("context.assignment_id", 0)
 	case "term":
-		a.v.Set("context.term_id", 0)
-		a.v.Set("context.course_year_id", 0)
-		a.v.Set("context.section_id", 0)
-		a.v.Set("context.assignment_id", 0)
+		a.setContext("context.term_id", 0)
+		a.setContext("context.course_year_id", 0)
+		a.setContext("context.section_id", 0)
+		a.setContext("context.assignment_id", 0)
 	case "course-year":
-		a.v.Set("context.course_year_id", 0)
-		a.v.Set("context.section_id", 0)
-		a.v.Set("context.assignment_id", 0)
+		a.setContext("context.course_year_id", 0)
+		a.setContext("context.section_id", 0)
+		a.setContext("context.assignment_id", 0)
 	case "section":
-		a.v.Set("context.section_id", 0)
+		a.setContext("context.section_id", 0)
 	case "assignment":
-		a.v.Set("context.assignment_id", 0)
+		a.setContext("context.assignment_id", 0)
 	default:
 		return fmt.Errorf("unknown scope: %s", scope)
 	}
-	if err := a.v.WriteConfig(); err != nil {
+	if err := a.writeContextConfig(); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.out, "Cleared %s context\n", scope)
@@ -347,7 +379,7 @@ func (a *App) autoSelectContextDefaults() (bool, []string, error) {
 			return false, nil, err
 		}
 		if len(items) == 1 {
-			a.v.Set("context.course_year_id", items[0].ID)
+			a.setContext("context.course_year_id", items[0].ID)
 			ctx.CourseYearID = items[0].ID
 			updated = true
 			notes = append(notes, fmt.Sprintf("Auto-selected course: %s", baseCourseName(items[0].Name)))
@@ -360,7 +392,7 @@ func (a *App) autoSelectContextDefaults() (bool, []string, error) {
 			return false, nil, err
 		}
 		if len(items) == 1 {
-			a.v.Set("context.term_id", items[0].ID)
+			a.setContext("context.term_id", items[0].ID)
 			ctx.TermID = items[0].ID
 			updated = true
 			notes = append(notes, fmt.Sprintf("Auto-selected term: %s", items[0].Name))
@@ -373,7 +405,7 @@ func (a *App) autoSelectContextDefaults() (bool, []string, error) {
 			return false, nil, err
 		}
 		if len(items) == 1 {
-			a.v.Set("context.section_id", items[0].ID)
+			a.setContext("context.section_id", items[0].ID)
 			ctx.SectionID = items[0].ID
 			updated = true
 			notes = append(notes, fmt.Sprintf("Auto-selected section: %s", items[0].Name))
@@ -381,7 +413,7 @@ func (a *App) autoSelectContextDefaults() (bool, []string, error) {
 	}
 
 	if updated {
-		if err := a.v.WriteConfig(); err != nil {
+		if err := a.writeContextConfig(); err != nil {
 			return false, nil, err
 		}
 	}
@@ -557,4 +589,56 @@ func joinNames(items []NamedID) string {
 		names = append(names, item.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+func (a *App) ListContextProfiles() error {
+	ctxDir := filepath.Join(a.homeDir, "contexts")
+	entries, err := os.ReadDir(ctxDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(a.out, "No saved context profiles.")
+			return nil
+		}
+		return err
+	}
+
+	var profiles []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		profiles = append(profiles, strings.TrimSuffix(name, ".yaml"))
+	}
+	sort.Strings(profiles)
+
+	fmt.Fprintln(a.out, "Context profiles")
+	for _, p := range profiles {
+		marker := ""
+		if a.profileName != "" && profileFileName(a.profileName) == p {
+			marker = " *"
+		}
+		fmt.Fprintf(a.out, "  %s%s\n", p, marker)
+	}
+	if a.profileName == "" {
+		fmt.Fprintln(a.out, "\nNo active profile (using legacy config.yaml context).")
+	} else {
+		fmt.Fprintf(a.out, "\nActive profile: %s\n", a.profileName)
+	}
+	return nil
+}
+
+func (a *App) ForgetContextProfile(name string) error {
+	path := filepath.Join(a.homeDir, "contexts", profileFileName(name)+".yaml")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("profile not found: %s", name)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Forgot profile: %s\n", name)
+	return nil
 }

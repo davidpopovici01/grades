@@ -6,6 +6,7 @@ This is a concise reference for the current command structure.
 
 ```text
 grades
+grades --class <course>
 grades setup
 grades context ...
 grades students ...
@@ -27,6 +28,15 @@ grades import ...
 grades export
 ```
 
+Use `grades --class <course>` (or the `GRADES_CONTEXT` environment variable) to run any command with a specific course's saved context. This is useful for shell aliases such as `ga='grades --class APCSA'`.
+
+Example:
+
+```powershell
+grades --class APCSA enter
+$env:GRADES_CONTEXT = "APCSA"; grades enter
+```
+
 ## Dashboard
 
 ```powershell
@@ -43,6 +53,13 @@ grades context use term <name>
 grades context use course <name-or-id>
 grades context use section <name-or-id>
 grades context use assignment <title-or-id>
+```
+
+Switching courses automatically saves the previous course's context and restores the new course's last-used context. Profiles are stored under `~/.grades/contexts/<Course>.yaml`.
+
+```powershell
+grades context profiles
+grades context forget <course>
 ```
 
 ```powershell
