@@ -1,9 +1,9 @@
 package app
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	"bytes"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -77,12 +76,43 @@ type portalAssignmentSnapshot struct {
 }
 
 type portalCourseSnapshot struct {
-	CourseYearID int                     `json:"courseYearId"`
-	TermID       int                     `json:"termId"`
-	CourseName   string                  `json:"courseName"`
-	TermName     string                  `json:"termName"`
-	PublishedAt  string                  `json:"publishedAt"`
-	Students     []portalStudentSnapshot `json:"students"`
+	CourseYearID   int                     `json:"courseYearId"`
+	TermID         int                     `json:"termId"`
+	CourseName     string                  `json:"courseName"`
+	CourseYearName string                  `json:"courseYearName"`
+	TermName       string                  `json:"termName"`
+	PublishedAt    string                  `json:"publishedAt"`
+	Students       []portalStudentSnapshot `json:"students"`
+}
+
+type portalPublishRequest struct {
+	Accounts []portalauth.Account `json:"accounts"`
+	Course   portalCourseInfo     `json:"course"`
+	Students []struct {
+		StudentID int             `json:"studentId"`
+		Snapshot  json.RawMessage `json:"snapshot"`
+	} `json:"students"`
+}
+
+type portalCourseInfo struct {
+	CourseYearID   int    `json:"courseYearId"`
+	TermID         int    `json:"termId"`
+	CourseName     string `json:"courseName"`
+	CourseYearName string `json:"courseYearName"`
+	TermName       string `json:"termName"`
+	PublishedAt    string `json:"publishedAt"`
+}
+
+// portalStudentCourse bundles one enrolled course's snapshot for the
+// preview server's /api/grades response. It mirrors portalserver.StudentSnapshot.
+type portalStudentCourse struct {
+	CourseYearID   int                   `json:"courseYearId"`
+	TermID         int                   `json:"termId"`
+	CourseName     string                `json:"courseName"`
+	CourseYearName string                `json:"courseYearName"`
+	TermName       string                `json:"termName"`
+	PublishedAt    string                `json:"publishedAt"`
+	Snapshot       portalStudentSnapshot `json:"snapshot"`
 }
 
 type portalSession struct {
@@ -91,11 +121,13 @@ type portalSession struct {
 }
 
 type portalServer struct {
-	app        *App
-	publishDir string
-	now        func() time.Time
-	mu         sync.Mutex
-	sessions   map[string]portalSession
+	app       *App
+	staticDir string
+	now       func() time.Time
+	mu        sync.Mutex
+	sessions  map[string]portalSession
+	// buildMu serializes snapshot builds, which temporarily mutate the app context.
+	buildMu sync.Mutex
 }
 
 type accountInitResult struct {
@@ -105,214 +137,108 @@ type accountInitResult struct {
 	Password  string
 }
 
-func (a *App) PublishStudentPortal(dir string) error {
+// PrintPortalTeacherToken prints the configured portal admin token so it can
+// be pasted into the portal's /admin login page.
+func (a *App) PrintPortalTeacherToken() error {
+	token := strings.TrimSpace(a.v.GetString("portal.teacher_token"))
+	if token == "" {
+		return errors.New("portal.teacher_token is not set in ~/.grades/config.yaml")
+	}
+	fmt.Fprintln(a.out, token)
+	return nil
+}
+
+func (a *App) PublishStudentPortal() error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return errors.New("set year, term, and course first")
 	}
-	publishDir, err := a.portalPublishDir(dir)
-	if err != nil {
-		return err
+
+	// Publishing pushes the snapshot to the portal server over HTTP. There is
+	// no local file consumer anymore: the preview server (web serve) builds
+	// snapshots straight from the database.
+	portalURL := strings.TrimSpace(a.v.GetString("portal.url"))
+	if portalURL == "" {
+		fmt.Fprintln(a.out, "portal.url is not configured; nothing to publish.")
+		fmt.Fprintln(a.out, "Set portal.url (and portal.teacher_token) in ~/.grades/config.yaml to push to the portal server,")
+		fmt.Fprintln(a.out, "or run 'grades web serve' for a local preview that reads the database directly.")
+		return nil
 	}
+	return a.PushStudentPortal(portalURL)
+}
+
+// PushStudentPortal sends the current course snapshot to the VPS portal API.
+func (a *App) PushStudentPortal(baseURL string) error {
+	ctx := a.context()
+	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return errors.New("set year, term, and course first")
+	}
+
 	snapshot, err := a.buildPortalCourseSnapshot(ctx.CourseYearID, ctx.TermID)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(publishDir, "students"), 0o755); err != nil {
-		return err
-	}
-	indexPayload := struct {
-		CourseYearID int    `json:"courseYearId"`
-		TermID       int    `json:"termId"`
-		CourseName   string `json:"courseName"`
-		TermName     string `json:"termName"`
-		PublishedAt  string `json:"publishedAt"`
-		StudentCount int    `json:"studentCount"`
-	}{
-		CourseYearID: snapshot.CourseYearID,
-		TermID:       snapshot.TermID,
-		CourseName:   snapshot.CourseName,
-		TermName:     snapshot.TermName,
-		PublishedAt:  snapshot.PublishedAt,
-		StudentCount: len(snapshot.Students),
-	}
-	if err := writeJSONFile(filepath.Join(publishDir, "index.json"), indexPayload); err != nil {
-		return err
-	}
-
-	// Export student accounts for the stateless portal server.
 	accounts, err := a.portalAccountsForCourseTerm(ctx.CourseYearID, ctx.TermID)
 	if err != nil {
 		return err
 	}
-	accountList := portalauth.AccountList{
-		Version:     1,
-		PublishedAt: snapshot.PublishedAt,
-		Accounts:    accounts,
-	}
-	if err := writeJSONFile(filepath.Join(publishDir, "accounts.json"), accountList); err != nil {
-		return err
-	}
 
+	payload := portalPublishRequest{
+		Accounts: accounts,
+		Course: portalCourseInfo{
+			CourseYearID:   snapshot.CourseYearID,
+			TermID:         snapshot.TermID,
+			CourseName:     snapshot.CourseName,
+			CourseYearName: snapshot.CourseYearName,
+			TermName:       snapshot.TermName,
+			PublishedAt:    snapshot.PublishedAt,
+		},
+	}
 	for _, student := range snapshot.Students {
-		if err := writeJSONFile(filepath.Join(publishDir, "students", strconv.Itoa(student.StudentID)+".json"), student); err != nil {
+		raw, err := json.Marshal(student)
+		if err != nil {
 			return err
 		}
+		payload.Students = append(payload.Students, struct {
+			StudentID int             `json:"studentId"`
+			Snapshot  json.RawMessage `json:"snapshot"`
+		}{StudentID: student.StudentID, Snapshot: raw})
 	}
-	fmt.Fprintf(a.out, "Published student portal to %s\n", publishDir)
-	fmt.Fprintf(a.out, "Published %d student snapshot(s)\n", len(snapshot.Students))
-	fmt.Fprintf(a.out, "Exported %d account(s)\n", len(accounts))
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	endpoint := strings.TrimSuffix(baseURL, "/") + "/api/admin/publish"
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token := strings.TrimSpace(a.v.GetString("portal.teacher_token")); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	resBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("portal publish failed (%d): %s", res.StatusCode, strings.TrimSpace(string(resBody)))
+	}
+
+	fmt.Fprintf(a.out, "Published student portal to %s\n", endpoint)
+	fmt.Fprintf(a.out, "Published %d student snapshot(s)\n", len(payload.Students))
+	fmt.Fprintf(a.out, "Exported %d account(s)\n", len(payload.Accounts))
 	return nil
-}
-
-// DeployStudentPortal uploads published portal data to the remote server via tar over ssh.
-func (a *App) DeployStudentPortal(verbose bool) error {
-	server := a.v.GetString("portal.server")
-	if server == "" {
-		return errors.New("portal server not configured. Add portal.server to your config file (~/.grades/config.yaml)")
-	}
-	key := a.v.GetString("portal.key")
-	remoteDir := a.v.GetString("portal.remote_dir")
-	if remoteDir == "" {
-		remoteDir = "~/portal"
-	}
-
-	publishDir := filepath.Join(a.homeDir, "..", "gradesPublished")
-	if _, err := os.Stat(publishDir); os.IsNotExist(err) {
-		return errors.New("no published data found. Run 'grades publish' or 'grades web deploy' (without --no-publish) first")
-	}
-
-	remoteDataDir := remoteDir + "/data"
-
-	fmt.Fprintf(a.out, "Deploying to %s\n", server)
-	fmt.Fprintf(a.out, "  Local:  %s\n", publishDir)
-	fmt.Fprintf(a.out, "  Remote: %s\n", remoteDataDir)
-
-	// Build ssh options (without server)
-	sshOpts := []string{"-o", "StrictHostKeyChecking=no"}
-	if key != "" {
-		sshOpts = append(sshOpts, "-i", key)
-	}
-
-	// Build local tar, then stream it over a single SSH connection
-	// (avoids multiple auth windows and pipe deadlock on Windows)
-	fmt.Fprintln(a.out, "  Creating archive...")
-
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("portal-%d.tar.gz", time.Now().Unix()))
-	defer os.Remove(tmpFile)
-
-	entries := []string{"accounts.json", "index.json", "students"}
-	if err := createTarGz(tmpFile, publishDir, entries); err != nil {
-		return fmt.Errorf("tar create failed: %w", err)
-	}
-
-	fmt.Fprintln(a.out, "  Uploading and extracting via ssh...")
-	sshArgs := append([]string{}, sshOpts...)
-	sshArgs = append(sshArgs, server, fmt.Sprintf("cd %s && tar xzf -", remoteDataDir))
-	sshCmd := exec.Command("ssh", sshArgs...)
-	f, err := os.Open(tmpFile)
-	if err != nil {
-		return fmt.Errorf("open archive failed: %w", err)
-	}
-	defer f.Close()
-	sshCmd.Stdin = f
-	if out, err := sshCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ssh upload/extract failed: %w\n%s", err, out)
-	}
-
-	fmt.Fprintln(a.out, "Deployed successfully.")
-	return nil
-}
-
-// createTarGz creates a gzipped tar archive of the named entries inside baseDir.
-func createTarGz(dest, baseDir string, entries []string) error {
-	f, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	gw := gzip.NewWriter(f)
-	defer gw.Close()
-
-	tw := tar.NewWriter(gw)
-	defer tw.Close()
-
-	for _, entry := range entries {
-		fullPath := filepath.Join(baseDir, entry)
-		info, err := os.Stat(fullPath)
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			if err := addDirToTar(tw, baseDir, entry); err != nil {
-				return err
-			}
-		} else {
-			if err := addFileToTar(tw, baseDir, entry); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func addFileToTar(tw *tar.Writer, baseDir, relPath string) error {
-	fullPath := filepath.Join(baseDir, relPath)
-	info, err := os.Stat(fullPath)
-	if err != nil {
-		return err
-	}
-	hdr, err := tar.FileInfoHeader(info, "")
-	if err != nil {
-		return err
-	}
-	hdr.Name = filepath.ToSlash(relPath)
-	if err := tw.WriteHeader(hdr); err != nil {
-		return err
-	}
-	f, err := os.Open(fullPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(tw, f)
-	return err
-}
-
-func addDirToTar(tw *tar.Writer, baseDir, relPath string) error {
-	fullPath := filepath.Join(baseDir, relPath)
-	return filepath.Walk(fullPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(baseDir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		hdr, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		hdr.Name = filepath.ToSlash(rel)
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			f, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			_, err = io.Copy(tw, f)
-			return err
-		}
-		return nil
-	})
 }
 
 func (a *App) InitStudentPortalAccounts(defaultPassword string, memorable bool) error {
@@ -428,7 +354,7 @@ func (a *App) ListStudentPortalAccounts() error {
 	return nil
 }
 
-func (a *App) ServeStudentPortal(addr, dir string) error {
+func (a *App) ServeStudentPortal(addr string) error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return errors.New("set year, term, and course first")
@@ -446,39 +372,54 @@ func (a *App) ServeStudentPortal(addr, dir string) error {
 			fmt.Fprintf(a.out, "%s\t%s\t%s\n", item.Name, item.Username, item.Password)
 		}
 	}
-	if err := a.PublishStudentPortal(dir); err != nil {
-		return err
+	server := &portalServer{app: a, staticDir: locatePortalWebDist(), now: time.Now, sessions: map[string]portalSession{}}
+	if server.staticDir != "" {
+		fmt.Fprintf(a.out, "Serving portal frontend from %s\n", server.staticDir)
+	} else {
+		fmt.Fprintln(a.out, "portal-web/dist not found; falling back to the legacy preview page.")
+		fmt.Fprintln(a.out, "Note: the legacy page differs from the production UI.")
+		fmt.Fprintln(a.out, "Build the real frontend with: cd portal-web && npm run build")
 	}
-	publishDir, err := a.portalPublishDir(dir)
-	if err != nil {
-		return err
-	}
-	server := &portalServer{app: a, publishDir: publishDir, now: time.Now, sessions: map[string]portalSession{}}
 	fmt.Fprintf(a.out, "Student portal serving at http://%s\n", addr)
 	return http.ListenAndServe(addr, server.routes())
 }
 
-func (a *App) portalPublishDir(dir string) (string, error) {
-	if strings.TrimSpace(dir) != "" {
-		return filepath.Clean(dir), nil
+// locatePortalWebDist finds the built React SPA (portal-web/dist), looking
+// relative to the working directory first and then next to the executable.
+// It returns "" when no built frontend is found.
+func locatePortalWebDist() string {
+	candidates := []string{filepath.Join("portal-web", "dist")}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "portal-web", "dist"),
+			filepath.Join(exeDir, "..", "portal-web", "dist"),
+		)
 	}
-	return filepath.Clean(filepath.Join(a.homeDir, "..", "gradesPublished")), nil
+	for _, candidate := range candidates {
+		info, err := os.Stat(filepath.Join(candidate, "index.html"))
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if abs, err := filepath.Abs(candidate); err == nil {
+			return abs
+		}
+		return candidate
+	}
+	return ""
 }
 
 func (a *App) buildPortalCourseSnapshot(courseYearID, termID int) (portalCourseSnapshot, error) {
 	var snapshot portalCourseSnapshot
 	snapshot.CourseYearID = courseYearID
 	snapshot.TermID = termID
-	if err := a.db.QueryRow(`
-		SELECT course_years.name, terms.name
-		FROM course_years
-		JOIN course_year_terms ON course_year_terms.course_year_id = course_years.course_year_id
-		JOIN terms ON terms.term_id = course_year_terms.term_id
-		WHERE course_years.course_year_id = ? AND terms.term_id = ?`,
-		courseYearID, termID).Scan(&snapshot.CourseName, &snapshot.TermName); err != nil {
+	courseName, courseYearName, termName, err := a.portalCourseTermNames(courseYearID, termID)
+	if err != nil {
 		return portalCourseSnapshot{}, err
 	}
-	snapshot.CourseName = baseCourseName(snapshot.CourseName)
+	snapshot.CourseName = courseName
+	snapshot.CourseYearName = courseYearName
+	snapshot.TermName = termName
 	snapshot.PublishedAt = time.Now().UTC().Format(time.RFC3339)
 	students, err := a.studentsForCourseTerm(courseYearID, termID, false)
 	if err != nil {
@@ -488,7 +429,7 @@ func (a *App) buildPortalCourseSnapshot(courseYearID, termID int) (portalCourseS
 	if err != nil {
 		return portalCourseSnapshot{}, err
 	}
-	cutoff, _ := a.OverviewCutoff()
+	cutoff := a.overviewCutoffForCourseTerm(courseYearID, termID)
 	for _, student := range students {
 		item, err := a.buildPortalStudentSnapshot(snapshot.CourseName, snapshot.TermName, courseYearID, termID, student, rules, cutoff)
 		if err != nil {
@@ -503,6 +444,121 @@ func (a *App) buildPortalCourseSnapshot(courseYearID, termID int) (portalCourseS
 		return snapshot.Students[i].LastName < snapshot.Students[j].LastName
 	})
 	return snapshot, nil
+}
+
+// portalCourseTermNames returns the display names for a course year and term:
+// the base course name, the year label (e.g. "2025-26"), and the term name.
+func (a *App) portalCourseTermNames(courseYearID, termID int) (string, string, string, error) {
+	var courseName, termName string
+	if err := a.db.QueryRow(`
+		SELECT course_years.name, terms.name
+		FROM course_years
+		JOIN course_year_terms ON course_year_terms.course_year_id = course_years.course_year_id
+		JOIN terms ON terms.term_id = course_year_terms.term_id
+		WHERE course_years.course_year_id = ? AND terms.term_id = ?`,
+		courseYearID, termID).Scan(&courseName, &termName); err != nil {
+		return "", "", "", err
+	}
+	return baseCourseName(courseName), courseYearLabel(courseName), termName, nil
+}
+
+// overviewCutoffForCourseTerm returns the overview cutoff assignment for a
+// course and term, or 0 when none is set. Unlike OverviewCutoff it does not
+// depend on the current context.
+func (a *App) overviewCutoffForCourseTerm(courseYearID, termID int) int {
+	var cutoff sql.NullInt64
+	err := a.db.QueryRow(`
+		SELECT overview_cutoff_assignment_id
+		FROM course_year_terms
+		WHERE course_year_id = ? AND term_id = ?`, courseYearID, termID).Scan(&cutoff)
+	if err != nil || !cutoff.Valid {
+		return 0
+	}
+	return int(cutoff.Int64)
+}
+
+// portalCoursesForStudent builds a grade snapshot for every course and term
+// the student is enrolled in, ordered by course and term name. The local
+// preview server uses this to serve /api/grades straight from the database.
+func (a *App) portalCoursesForStudent(studentID int) ([]portalStudentCourse, error) {
+	rows, err := a.db.Query(`
+		SELECT DISTINCT sections.course_year_id, section_enrollments.term_id
+		FROM section_enrollments
+		JOIN sections ON sections.section_id = section_enrollments.section_id
+		WHERE section_enrollments.student_pk = ?
+		ORDER BY sections.course_year_id, section_enrollments.term_id`, studentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pairs [][2]int
+	for rows.Next() {
+		var courseYearID, termID int
+		if err := rows.Scan(&courseYearID, &termID); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, [2]int{courseYearID, termID})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var courses []portalStudentCourse
+	for _, pair := range pairs {
+		entry, err := a.buildPortalStudentCourse(pair[0], pair[1], studentID)
+		if err != nil {
+			return nil, err
+		}
+		courses = append(courses, entry)
+	}
+	sort.Slice(courses, func(i, j int) bool {
+		if courses[i].CourseName == courses[j].CourseName {
+			return courses[i].TermName < courses[j].TermName
+		}
+		return courses[i].CourseName < courses[j].CourseName
+	})
+	return courses, nil
+}
+
+// buildPortalStudentCourse builds the /api/grades course entry for a single
+// student in one course and term.
+func (a *App) buildPortalStudentCourse(courseYearID, termID, studentID int) (portalStudentCourse, error) {
+	courseName, courseYearName, termName, err := a.portalCourseTermNames(courseYearID, termID)
+	if err != nil {
+		return portalStudentCourse{}, err
+	}
+	students, err := a.studentsForCourseTerm(courseYearID, termID, false)
+	if err != nil {
+		return portalStudentCourse{}, err
+	}
+	var student *Student
+	for i := range students {
+		if students[i].ID == studentID {
+			student = &students[i]
+			break
+		}
+	}
+	if student == nil {
+		return portalStudentCourse{}, fmt.Errorf("student %d is not enrolled in course year %d term %d", studentID, courseYearID, termID)
+	}
+	rules, err := a.categoryRulesForContext(courseYearID, termID)
+	if err != nil {
+		return portalStudentCourse{}, err
+	}
+	cutoff := a.overviewCutoffForCourseTerm(courseYearID, termID)
+	snapshot, err := a.buildPortalStudentSnapshot(courseName, termName, courseYearID, termID, *student, rules, cutoff)
+	if err != nil {
+		return portalStudentCourse{}, err
+	}
+	return portalStudentCourse{
+		CourseYearID:   courseYearID,
+		TermID:         termID,
+		CourseName:     courseName,
+		CourseYearName: courseYearName,
+		TermName:       termName,
+		PublishedAt:    time.Now().UTC().Format(time.RFC3339),
+		Snapshot:       snapshot,
+	}, nil
 }
 
 func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYearID, termID int, student Student, rules []CategoryRule, cutoff int) (portalStudentSnapshot, error) {
@@ -992,35 +1048,42 @@ func (a *App) portalAccountsForCourseTerm(courseYearID, termID int) ([]portalaut
 	return accounts, nil
 }
 
-func writeJSONFile(path string, data any) error {
-	bytes, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	bytes = append(bytes, '\n')
-	return os.WriteFile(path, bytes, 0o644)
-}
-
 func (s *portalServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/login", s.handleIndex)
-	mux.HandleFunc("/what-if", s.handleIndex)
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/change-password", s.handleChangePassword)
 	mux.HandleFunc("/api/grades", s.handleGrades)
+	mux.HandleFunc("/", s.handleStatic)
 	return mux
 }
 
-func (s *portalServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+// handleStatic serves the built React SPA when portal-web/dist is available,
+// falling back to index.html for client-side routes. Without a built frontend
+// it serves the legacy template page instead.
+func (s *portalServer) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = portalPageTemplate.Execute(w, map[string]any{"Title": "Student Grades Portal"})
+	// Unknown API paths get a JSON 404 so the frontend never parses the
+	// index.html fallback as an API response.
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if s.staticDir == "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = portalPageTemplate.Execute(w, map[string]any{"Title": "Student Grades Portal"})
+		return
+	}
+	path := filepath.Join(s.staticDir, r.URL.Path)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		path = filepath.Join(s.staticDir, "index.html")
+	}
+	http.ServeFile(w, r, path)
 }
 
 func (s *portalServer) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -1036,7 +1099,7 @@ func (s *portalServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid login payload")
 		return
 	}
-	studentID, mustChange, err := s.authenticate(payload.Username, payload.Password)
+	studentID, username, mustChange, err := s.authenticate(payload.Username, payload.Password)
 	if err != nil {
 		writeJSONError(w, http.StatusUnauthorized, "invalid username or password")
 		return
@@ -1047,7 +1110,7 @@ func (s *portalServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "grades_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mustChangePassword": mustChange})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "studentId": studentID, "username": username, "mustChangePassword": mustChange})
 }
 
 func (s *portalServer) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -1126,6 +1189,9 @@ func (s *portalServer) handleChangePassword(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleGrades serves the student's grade snapshots for every course they are
+// enrolled in, built live from the local database. The response shape matches
+// the VPS portal server: {"studentId": N, "courses": [...]}.
 func (s *portalServer) handleGrades(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1136,31 +1202,34 @@ func (s *portalServer) handleGrades(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "login required")
 		return
 	}
-	path := filepath.Join(s.publishDir, "students", strconv.Itoa(studentID)+".json")
-	data, err := os.ReadFile(path)
+	s.buildMu.Lock()
+	courses, err := s.app.portalCoursesForStudent(studentID)
+	s.buildMu.Unlock()
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "published student snapshot not found")
+		writeJSONError(w, http.StatusInternalServerError, "could not load grades")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write(data)
+	if courses == nil {
+		courses = []portalStudentCourse{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"studentId": studentID, "courses": courses})
 }
 
-func (s *portalServer) authenticate(username, password string) (int, bool, error) {
+func (s *portalServer) authenticate(username, password string) (int, string, bool, error) {
 	var studentID int
-	var salt, hash string
+	var dbUsername, salt, hash string
 	var mustChange int
 	err := s.app.db.QueryRow(`
-		SELECT student_pk, password_salt, password_hash, must_change_password
+		SELECT student_pk, username, password_salt, password_hash, must_change_password
 		FROM student_accounts
-		WHERE lower(username) = lower(?)`, strings.TrimSpace(username)).Scan(&studentID, &salt, &hash, &mustChange)
+		WHERE lower(username) = lower(?)`, strings.TrimSpace(username)).Scan(&studentID, &dbUsername, &salt, &hash, &mustChange)
 	if err != nil {
-		return 0, false, err
+		return 0, "", false, err
 	}
 	if !portalauth.VerifyPassword(password, salt, hash) {
-		return 0, false, errors.New("invalid password")
+		return 0, "", false, errors.New("invalid password")
 	}
-	return studentID, mustChange != 0, nil
+	return studentID, dbUsername, mustChange != 0, nil
 }
 
 func (s *portalServer) verifyStudentPassword(studentID int, password string) (bool, error) {

@@ -10,7 +10,7 @@ async function apiFetch(path, options = {}) {
     ...options,
   });
 
-  if (res.status === 401) {
+  if (res.status === 401 && !path.startsWith('/admin/')) {
     window.dispatchEvent(new CustomEvent('auth:unauthorized'));
   }
 
@@ -41,5 +41,25 @@ export const getMe = () =>
 export const getGrades = () =>
   apiFetch('/grades');
 
-export const getIndex = () =>
-  apiFetch('/index');
+export const adminFetch = (path, options = {}) => {
+  const token = sessionStorage.getItem('adminToken') || '';
+  return apiFetch(path, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...options.headers,
+    },
+  });
+};
+
+export const adminListCourses = () =>
+  adminFetch('/admin/courses');
+
+export const adminListStudents = (courseYearId, termId) =>
+  adminFetch(`/admin/courses/${courseYearId}/${termId}/students`);
+
+export const adminResetPassword = (studentId) =>
+  adminFetch(`/admin/students/${studentId}/reset-password`, { method: 'POST' });
+
+export const adminUnpublishCourse = (courseYearId, termId) =>
+  adminFetch(`/admin/courses/${courseYearId}/${termId}`, { method: 'DELETE' });

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/davidpopovici01/grades/internal/portalauth"
 )
 
 type ExcelReportOptions struct {
@@ -42,6 +44,15 @@ type excelReportStudentRow struct {
 	QuarterLetter string  `json:"quarter_letter"`
 	CScore1       string  `json:"c_score_1,omitempty"`
 	CScore2       string  `json:"c_score_2,omitempty"`
+}
+
+func findPython() (string, error) {
+	for _, name := range []string{"python3", "python"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("python interpreter not found in PATH (tried python3, python)")
 }
 
 func (a *App) ExcelReport(opts ExcelReportOptions) error {
@@ -135,7 +146,11 @@ func (a *App) ExcelReport(opts ExcelReportOptions) error {
 	if _, err := os.Stat(script); err != nil {
 		return err
 	}
-	run := exec.Command("python", script, workbook, payloadFile.Name())
+	pythonBin, err := findPython()
+	if err != nil {
+		return err
+	}
+	run := exec.Command(pythonBin, script, workbook, payloadFile.Name())
 	run.Stdout = a.out
 	run.Stderr = a.errOut
 	if err := run.Run(); err != nil {
@@ -191,7 +206,7 @@ func (a *App) buildExcelReportPayload(opts ExcelReportOptions, printable string)
 			ChineseName:   student.ChineseName,
 			ExamGrade:     math.Round(exam*10) / 10,
 			QuarterGrade:  roundedQuarter,
-			QuarterLetter: americanLetterGrade(float64(roundedQuarter)),
+			QuarterLetter: portalauth.AmericanLetterGrade(float64(roundedQuarter)),
 		})
 	}
 	return payload, nil

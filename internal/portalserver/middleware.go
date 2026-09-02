@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -21,14 +22,17 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 // corsMiddleware allows same-origin and localhost development requests.
+// The production SPA is served same-origin and needs no CORS headers; only
+// localhost/127.0.0.1 origins (any port) are reflected, since credentialed
+// reflection of arbitrary origins would let any website make authenticated
+// cross-origin calls.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
+		if origin := r.Header.Get("Origin"); origin != "" && isDevOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -36,6 +40,17 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isDevOrigin reports whether the origin is a localhost development origin
+// (localhost or 127.0.0.1, any port and scheme).
+func isDevOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1"
 }
 
 // loggingMiddleware logs each request with method, path, status, and duration.
@@ -59,17 +74,23 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// visitorIdleTTL is how long a visitor entry may go unused before eviction.
+const visitorIdleTTL = 10 * time.Minute
+
 // rateLimiter implements a simple per-IP token bucket rate limiter.
+// Idle visitor entries are evicted periodically so the map stays bounded on
+// long-running processes.
 type rateLimiter struct {
-	mu       sync.RWMutex
-	visitors map[string]*visitor
-	limit    int
-	window   time.Duration
+	mu        sync.Mutex
+	visitors  map[string]*visitor
+	limit     int
+	window    time.Duration
+	lastSweep time.Time
 }
 
 type visitor struct {
-	tokens    int
-	lastSeen  time.Time
+	tokens   int
+	lastSeen time.Time
 }
 
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
@@ -85,6 +106,10 @@ func (rl *rateLimiter) allow(ip string) bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	if now.Sub(rl.lastSweep) >= rl.window {
+		rl.sweep(now)
+	}
+
 	v, exists := rl.visitors[ip]
 	if !exists {
 		rl.visitors[ip] = &visitor{tokens: rl.limit - 1, lastSeen: now}
@@ -106,6 +131,17 @@ func (rl *rateLimiter) allow(ip string) bool {
 	return false
 }
 
+// sweep evicts visitors that have been idle longer than visitorIdleTTL.
+// Callers must hold rl.mu.
+func (rl *rateLimiter) sweep(now time.Time) {
+	rl.lastSweep = now
+	for ip, v := range rl.visitors {
+		if now.Sub(v.lastSeen) > visitorIdleTTL {
+			delete(rl.visitors, ip)
+		}
+	}
+}
+
 // rateLimitMiddleware enforces per-IP rate limiting.
 func rateLimitMiddleware(rl *rateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -121,11 +157,4 @@ func rateLimitMiddleware(rl *rateLimiter) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,12 +13,12 @@ import (
 
 func main() {
 	cfg := portalserver.Config{
-		DataDir:         getEnv("PORTAL_DATA_DIR", "./data"),
 		StaticDir:       getEnv("PORTAL_STATIC_DIR", "./static"),
+		DBPath:          getEnv("PORTAL_DB_PATH", filepath.Join(os.TempDir(), "grades-portal.db")),
 		Addr:            getEnv("PORTAL_ADDR", ":8080"),
 		CookieSecure:    getEnvBool("PORTAL_COOKIE_SECURE", false),
-		CookieDomain:    getEnv("PORTAL_COOKIE_DOMAIN", ""),
 		RateLimitPerMin: getEnvInt("PORTAL_RATE_LIMIT", 300),
+		TeacherToken:    getTeacherToken(),
 	}
 
 	secret := getJWTSecret()
@@ -30,10 +31,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
+	defer server.Close()
 
 	log.Printf("Portal server starting on %s", cfg.Addr)
-	log.Printf("Data dir: %s", cfg.DataDir)
 	log.Printf("Static dir: %s", cfg.StaticDir)
+	if cfg.TeacherToken == "" {
+		log.Println("Warning: PORTAL_TEACHER_TOKEN not set; admin endpoints are disabled")
+	}
 
 	if err := http.ListenAndServe(cfg.Addr, server.Handler()); err != nil {
 		log.Fatalf("Server error: %v", err)
@@ -82,4 +86,19 @@ func getJWTSecret() []byte {
 		return []byte(strings.TrimSpace(string(data)))
 	}
 	return nil
+}
+
+func getTeacherToken() string {
+	if v := os.Getenv("PORTAL_TEACHER_TOKEN"); v != "" {
+		return v
+	}
+	if path := os.Getenv("PORTAL_TEACHER_TOKEN_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("Warning: cannot read teacher token file: %v", err)
+			return ""
+		}
+		return strings.TrimSpace(string(data))
+	}
+	return ""
 }

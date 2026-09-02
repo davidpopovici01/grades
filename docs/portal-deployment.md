@@ -1,327 +1,201 @@
 # Portal Deployment Guide
 
-This guide covers deploying the student portal to your Singapore server.
+This guide covers deploying the student portal to the VPS (cs.lairdmath.com).
 
 ## Overview
 
 The portal consists of:
-- **Go binary** (`dist/portal`) — the HTTP server
+
+- **Go binary** (`dist/portal`, from `./cmd/portal`) — the HTTP server and JSON API
 - **Static files** (`portal-web/dist/`) — the React frontend
-- **Data files** (`data/`) — published grade snapshots + accounts
+- **SQLite database** (`/opt/portal/grades-portal.db`) — snapshots and accounts live here, written by the server itself
 
-## Option 1: SSH Deployment (Recommended)
+There are no data files to upload. Grade data flows over HTTP:
 
-SSH gives you full control: start/stop the service, check logs, restart after crashes.
+```text
+Laptop (grades CLI)                      VPS
+───────────────────                      ───
+grades export / grades publish  ──HTTPS──▶  Caddy (Let's Encrypt)
+  POST /api/admin/publish                    └── reverse_proxy ──▶ portal server (:8080)
+  Authorization: Bearer <token>                    ├── serves portal-web/dist (React SPA)
+                                                   ├── /api/* student endpoints (JWT cookie)
+                                                   └── /api/admin/* (teacher token)
+```
 
-### Prerequisites
+## Prerequisites
 
-- SSH access to your Singapore server
-- A domain or subdomain pointing to the server's IP (e.g., `cs.lairdmath.com`)
+- SSH access to the VPS
+- An A record pointing `cs.lairdmath.com` at the server's IP
+- Caddy on the VPS (installed by `server-setup.sh` if missing); it obtains the Let's Encrypt certificate automatically
 
-### Step 1: Build for Linux
+## One-Time Server Setup
 
-On your laptop (in the project root):
+Copy the repo (or at least `scripts/`) to the VPS, then run:
 
 ```bash
-# Build the Go binary for Linux
-cd /c/Users/david/grades
-GOOS=linux GOARCH=amd64 go build -o dist/portal ./cmd/portal
-
-# Build the frontend
-cd portal-web && npm run build && cd ..
-
-# Publish your grades
-go run . publish ./data
+sudo ./scripts/server-setup.sh
 ```
 
-### Step 2: Upload to server
+The script:
+
+- creates the `portal` system user and `/opt/portal/static`
+- generates `/opt/portal/.jwt-secret` (session signing) and `/opt/portal/.teacher-token` (admin bearer token), both `chmod 600`, owned by `portal`
+- installs Caddy if missing and writes a Caddyfile proxying `cs.lairdmath.com` to `localhost:8080`
+- prints the teacher token once — save it for the laptop config below
+
+Then install the systemd service:
 
 ```bash
-SERVER="user@your-singapore-server"
-
-# Create directories
-ssh $SERVER "sudo mkdir -p /opt/portal/data /opt/portal/static && sudo chown -R \$USER:\$USER /opt/portal"
-
-# Upload binary, static files, and data
-rsync -avz --delete dist/portal $SERVER:/opt/portal/
-rsync -avz --delete portal-web/dist/ $SERVER:/opt/portal/static/
-rsync -avz --delete data/ $SERVER:/opt/portal/data/
+scp scripts/portal.service user@server:/tmp/portal.service
+ssh user@server "sudo mv /tmp/portal.service /etc/systemd/system/portal.service && sudo systemctl daemon-reload"
 ```
 
-### Step 3: Generate JWT secret
+## Deploying Code
+
+From your laptop (builds the frontend, cross-compiles the binary, rsyncs both, restarts the service):
 
 ```bash
-ssh $SERVER "openssl rand -base64 32 | sudo tee /opt/portal/.jwt-secret > /dev/null && sudo chmod 600 /opt/portal/.jwt-secret"
-```
-
-### Step 4: Create systemd service
-
-Create `portal.service` locally, then upload it:
-
-```bash
-scp scripts/portal.service $SERVER:/tmp/portal.service
-ssh $SERVER "sudo mv /tmp/portal.service /etc/systemd/system/portal.service && sudo systemctl daemon-reload && sudo systemctl enable portal"
-```
-
-Start the service:
-
-```bash
-ssh $SERVER "sudo systemctl start portal"
-```
-
-Check status:
-
-```bash
-ssh $SERVER "sudo systemctl status portal"
-```
-
-View logs:
-
-```bash
-ssh $SERVER "sudo journalctl -u portal -f"
-```
-
-### Step 5: Set up the domain (cs.lairdmath.com)
-
-**DNS Setup:**
-
-1. Log into your DNS provider (wherever you manage `lairdmath.com`)
-2. Add an **A record**:
-   - Name: `cs`
-   - Value: `YOUR_SERVER_IP`
-   - TTL: 3600 (or auto)
-3. Wait 5-30 minutes for DNS propagation
-
-**Option A: Run directly on port 80/443 (simplest)**
-
-Update the systemd service to use port 80:
-
-```bash
-ssh $SERVER "sudo systemctl stop portal"
-ssh $SERVER "sudo sed -i 's/PORTAL_ADDR=:8080/PORTAL_ADDR=:80/' /etc/systemd/system/portal.service"
-ssh $SERVER "sudo systemctl daemon-reload && sudo systemctl start portal"
-```
-
-**Option B: Use Caddy as a reverse proxy (recommended for HTTPS)**
-
-Install Caddy on the server:
-
-```bash
-ssh $SERVER "sudo apt install -y caddy"
-```
-
-Create a Caddyfile:
-
-```bash
-ssh $SERVER "sudo tee /etc/caddy/Caddyfile << 'EOF'
-cs.lairdmath.com {
-    reverse_proxy localhost:8080
-}
-EOF"
-```
-
-Restart Caddy:
-
-```bash
-ssh $SERVER "sudo systemctl restart caddy"
-```
-
-Caddy will automatically get an SSL certificate from Let's Encrypt.
-
-### Step 6: Update grades later
-
-Whenever you update grades on your laptop:
-
-```bash
-cd /c/Users/david/grades
-go run . publish ./data
-rsync -avz --delete data/ $SERVER:/opt/portal/data/
-# No restart needed — server auto-reloads on next request
-```
-
-If you changed the Go binary or frontend:
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o dist/portal ./cmd/portal
-cd portal-web && npm run build && cd ..
-rsync -avz --delete dist/portal $SERVER:/opt/portal/
-rsync -avz --delete portal-web/dist/ $SERVER:/opt/portal/static/
-ssh $SERVER "sudo systemctl restart portal"
-```
-
----
-
-## Option 2: SFTP-Only Deployment
-
-If your host only gives you SFTP (no SSH shell access), you can still deploy, but with limitations.
-
-### What SFTP can do
-- ✅ Upload files
-- ❌ Start/stop processes
-- ❌ Check logs
-- ❌ Restart services
-
-### Step 1: Build locally (same as SSH)
-
-```bash
-cd /c/Users/david/grades
-GOOS=linux GOARCH=amd64 go build -o dist/portal ./cmd/portal
-cd portal-web && npm run build && cd ..
-go run . publish ./data
-```
-
-### Step 2: Upload via SFTP
-
-Use the provided script:
-
-```bash
-./scripts/deploy-sftp.sh
-```
-
-Or manually with an SFTP client like FileZilla, WinSCP, or Cyberduck:
-
-| Local Path | Remote Path |
-|-----------|-------------|
-| `dist/portal` | `/opt/portal/portal` |
-| `portal-web/dist/*` | `/opt/portal/static/*` |
-| `data/*` | `/opt/portal/data/*` |
-
-### Step 3: Ask your host to start the binary
-
-Since you can't run commands, open a support ticket:
-
-> "Hello, I have uploaded a custom web application to `/opt/portal/`. Please run the binary at `/opt/portal/portal` as a background process on startup. It should listen on port 8080. Here is my systemd service file: [attach scripts/portal.service]"
-
-### Step 4: Set up the domain
-
-Same DNS setup as SSH option:
-1. Add A record `cs` → your server IP
-2. If your host provides a control panel for domains, you may also need to configure the subdomain there
-
-### Limitations of SFTP-only
-
-- **If the server crashes:** You need to open another support ticket to restart it
-- **If you change the Go binary:** You need to ask the host to restart the service
-- **If you only update grade data:** The server auto-reloads on the next student request (no restart needed)
-- **No log access:** You can't see error messages when things break
-
-**Recommendation:** Ask your host for SSH access. It's standard for VPS hosting and makes everything easier.
-
----
-
-## Subdomain Setup (cs.lairdmath.com)
-
-### 1. DNS Configuration
-
-Log into wherever you manage `lairdmath.com` DNS (Cloudflare, Namecheap, GoDaddy, etc.):
-
-| Type | Name | Value | TTL |
-|------|------|-------|-----|
-| A | cs | YOUR_SERVER_IP | Auto/3600 |
-
-Example with `dig` to verify:
-
-```bash
-dig cs.lairdmath.com A +short
-# Should return your server IP
-```
-
-### 2. Server Configuration
-
-**If using Caddy (recommended):**
-
-Caddy handles HTTPS automatically. The `Caddyfile` is:
-
-```
-cs.lairdmath.com {
-    reverse_proxy localhost:8080
-}
-```
-
-Students visit: `https://cs.lairdmath.com`
-
-**If running directly on port 80:**
-
-Update `PORTAL_ADDR` to `:80` in the systemd service.
-
-Students visit: `http://cs.lairdmath.com`
-
-**If your host only allows port 8080:**
-
-Students visit: `http://cs.lairdmath.com:8080`
-
-(Not recommended — looks unprofessional and no HTTPS)
-
-### 3. Cookie Domain
-
-If running on a subdomain, you may want to set the cookie domain so it works correctly. Update the systemd service:
-
-```ini
-Environment="PORTAL_COOKIE_DOMAIN=cs.lairdmath.com"
-```
-
-### 4. Rate Limiting
-
-The portal rate-limits requests per IP (default: 300/min). If many students share a school network (same public IP), raise this limit in the systemd service:
-
-```ini
-Environment="PORTAL_RATE_LIMIT=600"
-```
-
-Set to `0` to disable rate limiting entirely (not recommended for public servers).
-
----
-
-## Quick Reference
-
-### Build and deploy (SSH)
-
-```bash
-# One-liner build + deploy
 ./scripts/deploy.sh
 ```
 
-### Build and deploy (SFTP)
+Override the target with the `SERVER` environment variable (default: `user@singapore-vps`):
 
 ```bash
-# Upload files only
-./scripts/deploy-sftp.sh
+SERVER="user@your-server" ./scripts/deploy.sh
 ```
 
-### Check server status (SSH)
+Alternative — build on the VPS itself:
 
 ```bash
-ssh user@server "sudo systemctl status portal"
+ssh user@server
+cd grades && git pull
+./scripts/build-portal.sh
+sudo cp dist/portal /opt/portal/portal
+sudo rsync -a --delete portal-web/dist/ /opt/portal/static/
+sudo systemctl restart portal
 ```
 
-### View logs (SSH)
+Finally, enable and start the service:
 
 ```bash
-ssh user@server "sudo journalctl -u portal -f"
+ssh user@server "sudo systemctl enable --now portal"
 ```
 
-### Restart server (SSH)
+## The systemd Service
+
+`scripts/portal.service` runs `/opt/portal/portal` as the `portal` user with this environment:
+
+| Variable | Value in portal.service | Purpose |
+|----------|------------------------|---------|
+| `PORTAL_ADDR` | `:8080` | listen address |
+| `PORTAL_STATIC_DIR` | `/opt/portal/static` | React frontend files |
+| `PORTAL_DB_PATH` | `/opt/portal/grades-portal.db` | SQLite store (created by the server) |
+| `PORTAL_JWT_SECRET_FILE` | `/opt/portal/.jwt-secret` | signs student session cookies |
+| `PORTAL_TEACHER_TOKEN_FILE` | `/opt/portal/.teacher-token` | admin bearer token |
+| `PORTAL_COOKIE_SECURE` | `true` | HTTPS-only cookies |
+| `PORTAL_RATE_LIMIT` | `300` | requests per minute per IP (`0` disables) |
+
+Notes:
+
+- `PORTAL_JWT_SECRET` / `PORTAL_TEACHER_TOKEN` (inline values) are accepted instead of the `*_FILE` variants. A JWT secret is **required** — the server refuses to start without one.
+- `PORTAL_COOKIE_DOMAIN` is unset by default; set it to `cs.lairdmath.com` if cookies misbehave on the subdomain.
+- Without a teacher token the server runs, but all `/api/admin/*` endpoints return 503.
+- If many students share one school IP, raise `PORTAL_RATE_LIMIT` (e.g. `600`).
+
+## Laptop Configuration
+
+Add to `~/.grades/config.yaml`:
+
+```yaml
+portal:
+  url: https://cs.lairdmath.com
+  teacher_token: <token printed by server-setup.sh>
+  server: user@your-server        # optional, for backups
+  key: ~/.ssh/id_ed25519          # optional, SSH key for backups
+  remote_dir: /opt/portal         # optional, default ~/portal
+```
+
+- `url` + `teacher_token` — used by `grades publish` and `grades export` to push snapshots
+- `server` / `key` / `remote_dir` — used by `grades system db backup-remote` (SSH/rsync)
+
+## Day-To-Day Use
+
+Publish the current course and term to the portal:
 
 ```bash
-ssh user@server "sudo systemctl restart portal"
+grades publish
 ```
 
----
+`grades export` (and `grades assignments export`) push automatically after exporting when `portal.url` is configured — no separate publish step is needed. With no `portal.url` set, `grades publish` skips with a notice; run `grades web serve` for a local preview that reads the database directly.
+
+### Student accounts
+
+Students log in with per-student usernames and passwords. Manage accounts from the CLI:
+
+```bash
+grades web accounts init              # create accounts for the current course/term
+grades web accounts init -m           # memorable 3-word passwords
+grades web accounts list              # show usernames
+grades web accounts reset <student>   # reset one password (-p to set it, -m for memorable)
+```
+
+Accounts are included in the next publish.
+
+### Admin UI
+
+Open `https://cs.lairdmath.com/admin` and log in with the teacher token. The dashboard lists published courses; each course shows its students, and you can reset a student's password or unpublish a course from there.
+
+## Backups
+
+The laptop's gradebook database is the source of truth. Copy it to the VPS over SSH:
+
+```bash
+grades system db backup-remote
+```
+
+This requires `portal.server` (and optionally `portal.key` / `portal.remote_dir`) in the config and writes to `<remote_dir>/backups/grades.db` via rsync. Local backups still work with `grades system db backup`.
+
+## Local Preview
+
+Quick preview without any server setup (embedded page, serves the current course snapshot):
+
+```bash
+grades web serve
+```
+
+To run the real portal server (React frontend + SQLite + admin API) locally:
+
+```bash
+./scripts/run-local.sh        # or scripts\run-local.ps1 on Windows
+```
+
+It builds `portal-web/dist` if missing, generates a throwaway JWT secret and teacher token under `dist/portal-local/`, and starts the server on `http://localhost:8080`. Point `portal.url` at `http://localhost:8080` to test publishing against it.
+
+## Service Operations
+
+```bash
+ssh user@server "sudo systemctl status portal"     # status
+ssh user@server "sudo journalctl -u portal -f"     # logs
+ssh user@server "sudo systemctl restart portal"    # restart
+```
 
 ## Troubleshooting
 
-**"Failed to fetch" in browser:**
-- Make sure you're accessing via `http://` not `file://`
-- Check if the server is running: `sudo systemctl status portal`
+**`grades publish` fails with 401:**
+- `portal.teacher_token` in `~/.grades/config.yaml` must match `/opt/portal/.teacher-token` on the server.
+
+**`grades publish` fails with 503 "admin API not configured":**
+- The server has no teacher token. Check that `PORTAL_TEACHER_TOKEN_FILE` points at a readable file and restart the service.
+
+**"Failed to fetch" in the browser:**
+- Check the service: `sudo systemctl status portal`
+- Check Caddy: `sudo systemctl status caddy`
 
 **Port already in use:**
-- Kill the old process: `sudo pkill portal`
-- Or change `PORTAL_ADDR` to a different port
-
-**Can't log in after updating grades:**
-- The server auto-reloads `accounts.json` on the next API request
-- If it still fails, check that `data/accounts.json` was uploaded correctly
+- Find the old process: `sudo lsof -i :8080`, or change `PORTAL_ADDR` in the service.
 
 **Domain not resolving:**
-- DNS can take 5-30 minutes to propagate
-- Check with: `dig cs.lairdmath.com A +short`
+- DNS can take 5–30 minutes to propagate. Check with: `dig cs.lairdmath.com A +short`
+
+**Students can't log in after publishing:**
+- Accounts are created with `grades web accounts init` on the laptop and pushed with the next publish. Verify with `grades web accounts list`.

@@ -57,7 +57,9 @@ excel-reports/
 data/
 test-data/
 passwords.txt
+reset-passwords.txt
 *.bak
+*:Zone.Identifier
 
 # Grade templates and data files
 *.xls

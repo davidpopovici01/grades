@@ -1,3 +1,5 @@
+> **Note:** This is a historical planning document. The command names and architecture described here predate the current CLI. See [`docs/command-reference.md`](docs/command-reference.md) for the current commands and [`docs/roadmap.md`](docs/roadmap.md) for current status.
+
 \# Grades CLI – Planned Capabilities
 
 

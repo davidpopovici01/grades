@@ -95,6 +95,7 @@ func NewRootCmdWithClass(in io.Reader, out, errOut io.Writer, className string) 
 		newWebCmd(gradesApp),
 		legacyHidden(newMigrateCmd(gradesApp)),
 		legacyHidden(newDBCmd(gradesApp)),
+		newVersionCmd(out),
 	)
 
 	return rootCmd
@@ -606,7 +607,7 @@ func newAssignmentsCmd(a *app.App) *cobra.Command {
 				if err := a.ExportPendingAssignments(); err != nil {
 					return err
 				}
-				return a.PublishStudentPortal("")
+				return a.PublishStudentPortal()
 			}
 			if len(args) > 1 {
 				return fmt.Errorf("assignments export accepts either [file] or -all")
@@ -618,10 +619,7 @@ func newAssignmentsCmd(a *app.App) *cobra.Command {
 			if err := a.ExportGrades(file); err != nil {
 				return err
 			}
-			if err := a.PublishStudentPortal(""); err != nil {
-				return err
-			}
-			return a.DeployStudentPortal(false)
+			return a.PublishStudentPortal()
 		},
 	})
 	curveCmd := &cobra.Command{
@@ -1029,10 +1027,7 @@ func newExportCmd(a *app.App) *cobra.Command {
 			if err := a.ExportPendingAssignments(); err != nil {
 				return err
 			}
-			if err := a.PublishStudentPortal(""); err != nil {
-				return err
-			}
-			return a.DeployStudentPortal(false)
+			return a.PublishStudentPortal()
 		},
 	}
 	cmd.AddCommand(&cobra.Command{
@@ -1046,7 +1041,7 @@ func newExportCmd(a *app.App) *cobra.Command {
 			if err := a.ExportGrades(file); err != nil {
 				return err
 			}
-			return a.PublishStudentPortal("")
+			return a.PublishStudentPortal()
 		},
 	})
 	return cmd
@@ -1054,15 +1049,11 @@ func newExportCmd(a *app.App) *cobra.Command {
 
 func newPublishCmd(a *app.App) *cobra.Command {
 	return &cobra.Command{
-		Use:   "publish [dir]",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "publish",
+		Args:  cobra.NoArgs,
 		Short: "Publish student portal data for the current course and term",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := ""
-			if len(args) == 1 {
-				dir = args[0]
-			}
-			return a.PublishStudentPortal(dir)
+			return a.PublishStudentPortal()
 		},
 	}
 }
@@ -1074,39 +1065,25 @@ func newWebCmd(a *app.App) *cobra.Command {
 		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 	cmd.AddCommand(&cobra.Command{
-		Use:   "serve [addr] [dir]",
-		Args:  cobra.MaximumNArgs(2),
+		Use:   "serve [addr]",
+		Args:  cobra.MaximumNArgs(1),
 		Short: "Serve the student portal locally",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			addr := ""
-			dir := ""
-			if len(args) >= 1 {
+			if len(args) == 1 {
 				addr = args[0]
 			}
-			if len(args) == 2 {
-				dir = args[1]
-			}
-			return a.ServeStudentPortal(addr, dir)
+			return a.ServeStudentPortal(addr)
 		},
 	})
-	deployCmd := &cobra.Command{
-		Use:   "deploy",
+	cmd.AddCommand(&cobra.Command{
+		Use:   "token",
 		Args:  cobra.NoArgs,
-		Short: "Publish and deploy portal data to the remote server",
+		Short: "Print the configured portal admin (teacher) token for the /admin login",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			verbose, _ := cmd.Flags().GetBool("verbose")
-			skipPublish, _ := cmd.Flags().GetBool("no-publish")
-			if !skipPublish {
-				if err := a.PublishStudentPortal(""); err != nil {
-					return err
-				}
-			}
-			return a.DeployStudentPortal(verbose)
+			return a.PrintPortalTeacherToken()
 		},
-	}
-	deployCmd.Flags().BoolP("verbose", "v", false, "show detailed scp output")
-	deployCmd.Flags().Bool("no-publish", false, "skip publishing, deploy existing data only")
-	cmd.AddCommand(deployCmd)
+	})
 	accounts := &cobra.Command{
 		Use:   "accounts",
 		Short: "Manage student portal accounts",
@@ -1198,6 +1175,14 @@ func newDBCmd(a *app.App) *cobra.Command {
 				file = args[0]
 			}
 			return a.BackupDB(file)
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "backup-remote",
+		Args:  cobra.NoArgs,
+		Short: "Copy the database to the configured portal server over SSH",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.BackupDBToRemote()
 		},
 	})
 	return cmd

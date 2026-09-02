@@ -1,5 +1,3 @@
-import { useEffect, useState } from 'react';
-import { getGrades } from '../api';
 import { ActionItems } from './ActionItems';
 import { ImprovementSummary } from './ImprovementSummary';
 
@@ -16,36 +14,14 @@ function formatPercent(value) {
   return `${value.toFixed(1)}%`;
 }
 
-export function GradeOverview() {
-  const [grades, setGrades] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    getGrades()
-      .then(setGrades)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="text-gray-500">Loading grades...</div>
-      </div>
-    );
-  }
-
-  if (error) {
+export function GradeOverview({ grades }) {
+  if (!grades) {
     return (
       <div className="text-center py-20">
-        <div className="text-red-600 mb-2">Failed to load grades</div>
-        <div className="text-sm text-gray-500">{error}</div>
+        <div className="text-gray-500">No grades available for this course.</div>
       </div>
     );
   }
-
-  if (!grades) return null;
 
   return (
     <div className="space-y-6">

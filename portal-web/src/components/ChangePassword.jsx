@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export function ChangePassword() {
+export function ChangePassword({ onChanged }) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -38,6 +38,7 @@ export function ChangePassword() {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
+      if (onChanged) onChanged();
     } catch (err) {
       setError(err.message);
     } finally {

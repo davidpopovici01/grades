@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { getGrades } from '../api';
 
 function formatPercent(value) {
   if (value === null || value === undefined || isNaN(value)) return '—';
@@ -116,9 +115,7 @@ function computeWeightedTotal(categories) {
   return (weightedSum / totalWeight) * 100;
 }
 
-export function WhatIfStudio() {
-  const [grades, setGrades] = useState(null);
-  const [loading, setLoading] = useState(true);
+export function WhatIfStudio({ grades }) {
   const [scenarios, setScenarios] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [scenarioTitle, setScenarioTitle] = useState('');
@@ -126,15 +123,10 @@ export function WhatIfStudio() {
   const [scenarioScore, setScenarioScore] = useState('');
 
   useEffect(() => {
-    getGrades()
-      .then((g) => {
-        setGrades(g);
-        if (g.categories?.length > 0) {
-          setSelectedCategory(String(g.categories[0].categoryId));
-        }
-      })
-      .finally(() => setLoading(false));
-  }, []);
+    if (grades?.categories?.length > 0) {
+      setSelectedCategory(String(grades.categories[0].categoryId));
+    }
+  }, [grades]);
 
   const projectedCategories = useMemo(() => {
     if (!grades) return [];
@@ -178,6 +170,14 @@ export function WhatIfStudio() {
     return computeWeightedTotal(projectedCategories);
   }, [projectedCategories]);
 
+  if (!grades) {
+    return (
+      <div className="text-center py-20">
+        <div className="text-gray-500">No grades available for this course.</div>
+      </div>
+    );
+  }
+
   const addScenario = () => {
     const max = parseFloat(scenarioMax);
     const score = parseFloat(scenarioScore);
@@ -208,16 +208,6 @@ export function WhatIfStudio() {
   const removeScenario = (id) => {
     setScenarios((prev) => prev.filter((s) => s.id !== id));
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="text-gray-500">Loading...</div>
-      </div>
-    );
-  }
-
-  if (!grades) return null;
 
   return (
     <div className="space-y-6">

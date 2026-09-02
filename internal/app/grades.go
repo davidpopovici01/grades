@@ -1149,6 +1149,10 @@ func (a *App) redoAssignmentsForStudent(studentID string) (Student, []redoAssign
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return Student{}, nil, "", errors.New("set year, term, and course first")
 	}
+	cutoff, err := a.OverviewCutoff()
+	if err != nil {
+		return Student{}, nil, "", err
+	}
 	if strings.TrimSpace(studentID) == "" {
 		var err error
 		studentID, err = a.prompt("Student")
@@ -1165,7 +1169,7 @@ func (a *App) redoAssignmentsForStudent(studentID string) (Student, []redoAssign
 		scope = "Using all sections in the current course."
 	}
 
-	rows, err := a.db.Query(`
+	query := `
 		SELECT assignments.assignment_id,
 		       assignments.title,
 		       categories.name,
@@ -1181,8 +1185,14 @@ func (a *App) redoAssignmentsForStudent(studentID string) (Student, []redoAssign
 		  ON category_grading_policies.course_year_id = assignments.course_year_id
 		 AND category_grading_policies.term_id = assignments.term_id
 		 AND category_grading_policies.category_id = assignments.category_id
-		WHERE assignments.course_year_id = ? AND assignments.term_id = ?
-		ORDER BY assignments.assignment_id`, student.ID, ctx.CourseYearID, ctx.TermID)
+		WHERE assignments.course_year_id = ? AND assignments.term_id = ?`
+	args := []any{student.ID, ctx.CourseYearID, ctx.TermID}
+	if cutoff > 0 {
+		query += ` AND assignments.assignment_id > ?`
+		args = append(args, cutoff)
+	}
+	query += ` ORDER BY assignments.assignment_id`
+	rows, err := a.db.Query(query, args...)
 	if err != nil {
 		return Student{}, nil, "", err
 	}
@@ -1214,6 +1224,10 @@ func (a *App) makeupAssignmentsForStudent(studentID string) (Student, []makeupAs
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return Student{}, nil, "", errors.New("set year, term, and course first")
 	}
+	cutoff, err := a.OverviewCutoff()
+	if err != nil {
+		return Student{}, nil, "", err
+	}
 	if strings.TrimSpace(studentID) == "" {
 		var err error
 		studentID, err = a.prompt("Student")
@@ -1229,7 +1243,7 @@ func (a *App) makeupAssignmentsForStudent(studentID string) (Student, []makeupAs
 	if ctx.SectionID == 0 {
 		scope = "Using all sections in the current course."
 	}
-	rows, err := a.db.Query(`
+	query := `
 		SELECT assignments.assignment_id,
 		       assignments.title,
 		       categories.name,
@@ -1245,8 +1259,14 @@ func (a *App) makeupAssignmentsForStudent(studentID string) (Student, []makeupAs
 		  ON category_grading_policies.course_year_id = assignments.course_year_id
 		 AND category_grading_policies.term_id = assignments.term_id
 		 AND category_grading_policies.category_id = assignments.category_id
-		WHERE assignments.course_year_id = ? AND assignments.term_id = ?
-		ORDER BY assignments.assignment_id`, student.ID, ctx.CourseYearID, ctx.TermID)
+		WHERE assignments.course_year_id = ? AND assignments.term_id = ?`
+	args := []any{student.ID, ctx.CourseYearID, ctx.TermID}
+	if cutoff > 0 {
+		query += ` AND assignments.assignment_id > ?`
+		args = append(args, cutoff)
+	}
+	query += ` ORDER BY assignments.assignment_id`
+	rows, err := a.db.Query(query, args...)
 	if err != nil {
 		return Student{}, nil, "", err
 	}
@@ -1415,9 +1435,9 @@ func formatGradeValue(entry gradeEntry) string {
 		return ""
 	}
 	if entry.Flags&flagLate != 0 {
-		return fmt.Sprintf("%.0fL", *entry.Score)
+		return fmt.Sprintf("%.1fL", *entry.Score)
 	}
-	return fmt.Sprintf("%.0f", *entry.Score)
+	return fmt.Sprintf("%.1f", *entry.Score)
 }
 
 func displayGradePlain(record GradeRecord) string {
@@ -1436,7 +1456,7 @@ func displayGradePlain(record GradeRecord) string {
 		return "P"
 	case record.Flags&flagRedo != 0:
 		if record.Score.Valid {
-			value := fmt.Sprintf("%.0f", record.Score.Float64)
+			value := fmt.Sprintf("%.1f", record.Score.Float64)
 			if record.Flags&flagLate != 0 {
 				value += "L"
 			}
@@ -1451,7 +1471,7 @@ func displayGradePlain(record GradeRecord) string {
 	case !record.Score.Valid:
 		return ""
 	}
-	value := fmt.Sprintf("%.0f", record.Score.Float64)
+	value := fmt.Sprintf("%.1f", record.Score.Float64)
 	if record.Flags&flagLate != 0 {
 		value += "L"
 	}
@@ -1493,7 +1513,7 @@ func displayGrade(record GradeRecord) string {
 		return colorGreen("P")
 	case record.Flags&flagRedo != 0:
 		if record.Score.Valid {
-			value := fmt.Sprintf("%.0f", record.Score.Float64)
+			value := fmt.Sprintf("%.1f", record.Score.Float64)
 			if record.Flags&flagLate != 0 {
 				value += "L"
 			}
@@ -1508,7 +1528,7 @@ func displayGrade(record GradeRecord) string {
 	case !record.Score.Valid:
 		return ""
 	}
-	value := fmt.Sprintf("%.0f", record.Score.Float64)
+	value := fmt.Sprintf("%.1f", record.Score.Float64)
 	if record.Flags&flagLate != 0 {
 		value += "L"
 	}

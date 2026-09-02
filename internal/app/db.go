@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -66,5 +67,45 @@ func (a *App) BackupDB(file string) error {
 		return err
 	}
 	fmt.Fprintf(a.out, "Database backup created: %s\n", file)
+	return nil
+}
+
+// BackupDBToRemote copies the local SQLite database to the VPS over SSH.
+func (a *App) BackupDBToRemote() error {
+	server := strings.TrimSpace(a.v.GetString("portal.server"))
+	if server == "" {
+		return fmt.Errorf("portal server not configured. Add portal.server to your config file (~/.grades/config.yaml)")
+	}
+	key := strings.TrimSpace(a.v.GetString("portal.key"))
+	remoteDir := strings.TrimSpace(a.v.GetString("portal.remote_dir"))
+	if remoteDir == "" {
+		remoteDir = "~/portal"
+	}
+	remoteDir = filepath.Clean(remoteDir)
+	backupDir := filepath.Join(remoteDir, "backups")
+
+	sshOpts := []string{"-o", "StrictHostKeyChecking=no"}
+	if key != "" {
+		sshOpts = append(sshOpts, "-i", key)
+	}
+
+	fmt.Fprintf(a.out, "Backing up database to %s:%s\n", server, backupDir)
+
+	mkdirArgs := append(append([]string{}, sshOpts...), server, "mkdir -p "+backupDir)
+	if out, err := exec.Command("ssh", mkdirArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ssh mkdir failed: %w\n%s", err, out)
+	}
+
+	sshCmd := "ssh"
+	if len(sshOpts) > 0 {
+		sshCmd += " " + strings.Join(sshOpts, " ")
+	}
+	remotePath := fmt.Sprintf("%s:%s/grades.db", server, backupDir)
+	rsyncArgs := []string{"-avz", "-e", sshCmd, a.dbPath, remotePath}
+	if out, err := exec.Command("rsync", rsyncArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("rsync backup failed: %w\n%s", err, out)
+	}
+
+	fmt.Fprintf(a.out, "Remote backup created: %s\n", remotePath)
 	return nil
 }

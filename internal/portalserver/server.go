@@ -7,137 +7,53 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/davidpopovici01/grades/internal/portalauth"
 )
 
 // Config holds the portal server configuration.
 type Config struct {
-	DataDir          string
-	StaticDir        string
-	JWTSecret        []byte
-	Addr             string
-	CookieSecure     bool
-	CookieDomain     string
-	RateLimitPerMin  int
+	StaticDir       string
+	DBPath          string
+	JWTSecret       []byte
+	TeacherToken    string
+	Addr            string
+	CookieSecure    bool
+	RateLimitPerMin int
 }
 
-// Server is the stateless student portal HTTP server.
+// Server is the student portal HTTP server, backed by a SQLite store.
 type Server struct {
-	config          Config
-	jwt             *JWTHelper
-	mu              sync.RWMutex
-	accounts        map[string]portalauth.Account // keyed by lowercase username
-	students        map[int]portalauth.Account    // keyed by studentId
-	accountsLoaded  time.Time                     // when accounts.json was last loaded
-	passwordChanges map[int]portalauth.Account    // local server-side password changes
+	config Config
+	jwt    *JWTHelper
+	store  *Store
 }
 
-// NewServer creates a new portal server, loading account data from disk.
+// NewServer creates a new portal server, opening (and migrating) the SQLite
+// store at cfg.DBPath, defaulting to a temp-dir database when empty.
 func NewServer(cfg Config) (*Server, error) {
 	if len(cfg.JWTSecret) == 0 {
 		return nil, fmt.Errorf("JWT secret is required")
 	}
 
-	s := &Server{
-		config:          cfg,
-		jwt:             NewJWTHelper(cfg.JWTSecret),
-		accounts:        make(map[string]portalauth.Account),
-		students:        make(map[int]portalauth.Account),
-		passwordChanges: make(map[int]portalauth.Account),
+	dbPath := cfg.DBPath
+	if dbPath == "" {
+		dbPath = filepath.Join(os.TempDir(), "grades-portal.db")
+	}
+	store, err := NewStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open portal database: %w", err)
 	}
 
-	if err := s.reloadAccounts(); err != nil {
-		return nil, fmt.Errorf("failed to load accounts: %w", err)
-	}
-
-	return s, nil
+	return &Server{
+		config: cfg,
+		jwt:    NewJWTHelper(cfg.JWTSecret),
+		store:  store,
+	}, nil
 }
 
-// maybeReloadAccounts checks if accounts.json has changed and reloads it.
-func (s *Server) maybeReloadAccounts() error {
-	path := filepath.Join(s.config.DataDir, "accounts.json")
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if info.ModTime().After(s.accountsLoaded) {
-		return s.reloadAccounts()
-	}
-	return nil
-}
-
-// reloadAccounts reads accounts.json from the data directory and merges with local password changes.
-func (s *Server) reloadAccounts() error {
-	path := filepath.Join(s.config.DataDir, "accounts.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("cannot read accounts.json: %w", err)
-	}
-
-	var list portalauth.AccountList
-	if err := json.Unmarshal(data, &list); err != nil {
-		return fmt.Errorf("cannot parse accounts.json: %w", err)
-	}
-
-	// Load local password changes.
-	s.loadPasswordChanges()
-
-	newAccounts := make(map[string]portalauth.Account, len(list.Accounts))
-	newStudents := make(map[int]portalauth.Account, len(list.Accounts))
-	for _, acc := range list.Accounts {
-		// If server has a newer password change, use it.
-		if local, ok := s.passwordChanges[acc.StudentID]; ok {
-			if local.PasswordChangedAt > acc.PasswordChangedAt {
-				acc = local
-			}
-		}
-		newAccounts[strings.ToLower(acc.Username)] = acc
-		newStudents[acc.StudentID] = acc
-	}
-
-	s.accounts = newAccounts
-	s.students = newStudents
-	s.accountsLoaded = time.Now()
-	return nil
-}
-
-// loadPasswordChanges reads password-changes.json from the data directory.
-func (s *Server) loadPasswordChanges() {
-	path := filepath.Join(s.config.DataDir, "password-changes.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return // file may not exist yet
-	}
-	var list portalauth.AccountList
-	if err := json.Unmarshal(data, &list); err != nil {
-		return
-	}
-	for _, acc := range list.Accounts {
-		s.passwordChanges[acc.StudentID] = acc
-	}
-}
-
-// savePasswordChanges writes password-changes.json to the data directory.
-func (s *Server) savePasswordChanges() error {
-	var accounts []portalauth.Account
-	for _, acc := range s.passwordChanges {
-		accounts = append(accounts, acc)
-	}
-	list := portalauth.AccountList{
-		Version:     1,
-		PublishedAt: time.Now().UTC().Format(time.RFC3339),
-		Accounts:    accounts,
-	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	path := filepath.Join(s.config.DataDir, "password-changes.json")
-	return os.WriteFile(path, data, 0o644)
+// Close releases server resources.
+func (s *Server) Close() error {
+	return s.store.Close()
 }
 
 // Handler returns the HTTP handler with all routes and middleware applied.
@@ -149,6 +65,8 @@ func (s *Server) Handler() http.Handler {
 	rl := newRateLimiter(limit, time.Minute)
 
 	mux := http.NewServeMux()
+
+	// Student routes
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/me", s.handleMe)
@@ -156,15 +74,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/grades", s.handleGrades)
 	mux.HandleFunc("/api/index", s.handleIndex)
 
-	// Static files and SPA fallback.
+	// Admin routes
+	mux.HandleFunc("/api/admin/publish", s.adminAuth(s.handleAdminPublish))
+	mux.HandleFunc("/api/admin/courses", s.adminAuth(s.handleAdminListCourses))
+	mux.HandleFunc("/api/admin/courses/", s.adminAuth(s.handleAdminCourseRoutes))
+	mux.HandleFunc("/api/admin/students/", s.adminAuth(s.handleAdminResetPassword))
+
+	// Static files and SPA fallback. Unknown /api paths get a JSON 404 so the
+	// frontend never parses index.html as an API response.
 	fs := http.FileServer(http.Dir(s.config.StaticDir))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// If the path is an API route, it was already handled above.
-		// Otherwise try to serve a static file.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
 		path := filepath.Join(s.config.StaticDir, r.URL.Path)
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
-			// Fall back to index.html for client-side routing.
 			http.ServeFile(w, r, filepath.Join(s.config.StaticDir, "index.html"))
 			return
 		}
@@ -178,6 +104,23 @@ func (s *Server) Handler() http.Handler {
 	handler = loggingMiddleware(handler)
 
 	return handler
+}
+
+// adminAuth protects admin routes with a bearer token.
+func (s *Server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := s.config.TeacherToken
+		if token == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "admin API not configured"})
+			return
+		}
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")) != token {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next(w, r)
+	}
 }
 
 // cookieName is the name of the JWT cookie.

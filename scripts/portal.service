@@ -7,9 +7,10 @@ Type=simple
 User=portal
 Group=portal
 WorkingDirectory=/opt/portal
-Environment="PORTAL_DATA_DIR=/opt/portal/data"
 Environment="PORTAL_STATIC_DIR=/opt/portal/static"
+Environment="PORTAL_DB_PATH=/opt/portal/grades-portal.db"
 Environment="PORTAL_JWT_SECRET_FILE=/opt/portal/.jwt-secret"
+Environment="PORTAL_TEACHER_TOKEN_FILE=/opt/portal/.teacher-token"
 Environment="PORTAL_ADDR=:8080"
 Environment="PORTAL_COOKIE_SECURE=true"
 Environment="PORTAL_RATE_LIMIT=300"

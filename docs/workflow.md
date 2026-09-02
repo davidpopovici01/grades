@@ -275,12 +275,28 @@ Was the export successful? [y/N]
 
 Only a confirmed export is marked complete.
 
+### Student Portal
+
+When `portal.url` is set in `~/.grades/config.yaml`, every export (including `grades export` and `grades assignments export`) also pushes the course snapshot to the student portal. To publish without exporting, run:
+
+```powershell
+grades publish
+```
+
+See [`portal-deployment.md`](portal-deployment.md) for setup.
+
 ## 9. Backup And Repair
 
 Backup:
 
 ```powershell
 grades system db backup
+```
+
+Copy the database to the portal server over SSH (requires `portal.server` in `~/.grades/config.yaml`):
+
+```powershell
+grades system db backup-remote
 ```
 
 Audit repairable legacy rows:

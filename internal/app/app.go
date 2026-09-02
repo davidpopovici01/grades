@@ -72,6 +72,8 @@ func NewWithClass(in io.Reader, out, errOut io.Writer, class string) (*App, erro
 	v.SetDefault("portal.server", "")
 	v.SetDefault("portal.key", "")
 	v.SetDefault("portal.remote_dir", "~/portal")
+	v.SetDefault("portal.url", "")
+	v.SetDefault("portal.teacher_token", "")
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 		if err := v.WriteConfigAs(configPath); err != nil {
 			return nil, err

@@ -174,6 +174,10 @@ Was the export successful? [y/N]
 
 If you answer `no`, the assignment remains pending.
 
+### Portal Publishing
+
+When `portal.url` is set in `~/.grades/config.yaml`, every export command also pushes the current course snapshot and portal accounts to the student portal over HTTP. `grades publish` triggers the same push without exporting. See [`portal-deployment.md`](portal-deployment.md).
+
 ## PowerSchool Export Format
 
 The export file uses a PowerSchool-style CSV.

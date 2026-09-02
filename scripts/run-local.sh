@@ -1,46 +1,49 @@
 #!/bin/bash
+# Run the student portal server locally for testing.
+# Serves the React frontend from portal-web/dist with a throwaway SQLite DB.
 set -e
 
 cd "$(dirname "$0")/.."
 
-# Use a local data directory for testing
-DATA_DIR="${1:-./data}"
 STATIC_DIR="./portal-web/dist"
+LOCAL_DIR="./dist/portal-local"
 
 # Build frontend if needed
 if [ ! -d "$STATIC_DIR" ]; then
     echo "Building frontend..."
-    cd portal-web && npm run build
-    cd ..
+    (cd portal-web && npm ci && npm run build)
 fi
 
-# Build portal binary for local OS
-echo "Building portal binary..."
-go build -o dist/portal-local ./cmd/portal
+mkdir -p "$LOCAL_DIR"
 
-# Generate a test JWT secret if not present
-SECRET_FILE=".jwt-secret-local"
-if [ ! -f "$SECRET_FILE" ]; then
-    openssl rand -base64 32 > "$SECRET_FILE"
-    echo "Generated test JWT secret: $SECRET_FILE"
+# Generate a test JWT secret and teacher token if not present
+if [ ! -f "$LOCAL_DIR/jwt-secret" ]; then
+    openssl rand -base64 32 > "$LOCAL_DIR/jwt-secret"
 fi
-
-# Publish grades if data dir doesn't exist or is empty
-if [ ! -f "$DATA_DIR/accounts.json" ]; then
-    echo "Publishing grades to $DATA_DIR..."
-    go run ./cmd/grades web publish "$DATA_DIR"
+if [ ! -f "$LOCAL_DIR/teacher-token" ]; then
+    openssl rand -base64 32 > "$LOCAL_DIR/teacher-token"
 fi
+TOKEN="$(cat "$LOCAL_DIR/teacher-token")"
 
 echo ""
 echo "Starting local portal server..."
-echo "  Data dir:   $DATA_DIR"
-echo "  Static dir: $STATIC_DIR"
-echo "  URL:        http://localhost:8080"
+echo "  URL:           http://localhost:8080"
+echo "  Admin UI:      http://localhost:8080/admin"
+echo "  Teacher token: $TOKEN"
+echo "  Database:      $LOCAL_DIR/grades-portal.db"
+echo ""
+echo "To push grades to this server, set in ~/.grades/config.yaml:"
+echo "  portal.url: http://localhost:8080"
+echo "  portal.teacher_token: $TOKEN"
+echo "then run: grades publish"
+echo ""
+echo "For a quick preview without this server, use: grades web serve"
 echo ""
 
-PORTAL_DATA_DIR="$DATA_DIR" \
+PORTAL_DB_PATH="$LOCAL_DIR/grades-portal.db" \
 PORTAL_STATIC_DIR="$STATIC_DIR" \
-PORTAL_JWT_SECRET_FILE="$SECRET_FILE" \
+PORTAL_JWT_SECRET_FILE="$LOCAL_DIR/jwt-secret" \
+PORTAL_TEACHER_TOKEN_FILE="$LOCAL_DIR/teacher-token" \
 PORTAL_ADDR="localhost:8080" \
 PORTAL_COOKIE_SECURE="false" \
-    ./dist/portal-local
+    go run ./cmd/portal

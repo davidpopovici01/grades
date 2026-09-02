@@ -17,15 +17,22 @@ grades show
 grades pass
 grades fill ...
 grades mark-late
+grades mark-zero-redo
+grades mark-zero-late
 grades clear-late
 grades clear-redo
 grades clear-cheat
 grades gradebook
 grades overview
 grades stats ...
+grades reports ...
+grades excel-report
 grades system ...
 grades import ...
 grades export
+grades publish
+grades web ...
+grades version
 ```
 
 Use `grades --class <course>` (or the `GRADES_CONTEXT` environment variable) to run any command with a specific course's saved context. This is useful for shell aliases such as `ga='grades --class APCSA'`.
@@ -100,11 +107,16 @@ grades categories weight <category> <percent>
 grades categories schemes
 grades categories set-scheme <category> <scheme>
 grades categories pass-rate <category> <percent|raw>
+grades categories show <category>
+grades categories hide <category>
+grades categories set-visibility <category> <true|false>
 grades categories import [file]
 grades categories setup-csv [file]
 grades categories scores
 grades categories totals
 ```
+
+`show`, `hide`, and `set-visibility` control whether a category appears in the overview.
 
 ## Assignments
 
@@ -112,6 +124,7 @@ grades categories totals
 grades assignments add
 grades assignments list
 grades assignments show [assignment-id]
+grades assignments edit
 grades assignments delete [assignment-id]
 grades assignments max <points>
 grades assignments pass-rate <percent|raw|default>
@@ -137,6 +150,8 @@ grades pass [student]
 grades fill pass
 grades mark-late
 grades mark-late -undo
+grades mark-zero-redo
+grades mark-zero-late
 grades clear-late [student]
 grades clear-redo [student]
 grades clear-cheat [student]
@@ -165,7 +180,12 @@ grades overview --clear-after
 grades stats assignment
 grades stats section
 grades stats student <student-id>
+grades reports suggest
+grades reports create <student> [file]
+grades excel-report [workbook]
 ```
+
+`excel-report` fills the Senior 2 APCSA Excel report. Flags: `--workbook`, `--sheet` (default `Senior2`), `--teacher`, `--exam-category` (default `Midterm`), `--printable`, `--skip-c-scores`.
 
 Overview cutoff:
 
@@ -186,20 +206,50 @@ grades import setup-csv [file]
 
 ```powershell
 grades export
+grades export grades [file]
 ```
 
-Exports every assignment in the current course and term that still needs export confirmation.
+Exports every assignment in the current course and term that still needs export confirmation. When `portal.url` is set in `~/.grades/config.yaml`, export also pushes the course snapshot to the student portal afterwards (same as `grades publish`).
+
+## Student Portal
+
+```powershell
+grades publish
+grades web serve [addr]
+grades web token
+grades web accounts init [default-password] [-m]
+grades web accounts list
+grades web accounts reset <student> [-p <password>] [-m]
+```
+
+- `grades publish` pushes the current course and term to the portal over HTTP when `portal.url` is configured; with no `portal.url` it skips with a notice.
+- `grades web serve` runs a local preview of the student portal (default `127.0.0.1:8080`), serving the built React app from `portal-web/dist` when available and reading grade data straight from the database.
+- `grades web token` prints the admin (teacher) token from your config, for pasting into the portal's `/admin` login page.
+- `grades web accounts` manages the local student accounts that are included in each publish.
+
+See [`portal-deployment.md`](portal-deployment.md) for server setup and configuration.
 
 ## System
 
 ```powershell
 grades system db reset
 grades system db backup [file]
+grades system db backup-remote
 grades system migrate up
 grades system migrate down
 grades system repair audit
 grades system repair apply
 ```
+
+`grades system db backup-remote` copies the database to the portal server over SSH; it needs `portal.server` (and optionally `portal.key` / `portal.remote_dir`) in `~/.grades/config.yaml`.
+
+## Version
+
+```powershell
+grades version
+```
+
+Shows the CLI version (injected at build time; `dev` for `go run`).
 
 ## Legacy Aliases
 

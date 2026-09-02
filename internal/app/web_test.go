@@ -33,15 +33,12 @@ func TestStudentPortalWorkflow(t *testing.T) {
 	if err := portalApp.InitStudentPortalAccounts("TempPass123", false); err != nil {
 		t.Fatalf("init accounts: %v", err)
 	}
-	if err := portalApp.PublishStudentPortal(""); err != nil {
-		t.Fatalf("publish portal: %v", err)
-	}
 
+	// No staticDir: the preview falls back to the legacy template page.
 	server := &portalServer{
-		app:        portalApp,
-		publishDir: filepath.Join(home, "..", "gradesPublished"),
-		now:        portalFixedNow,
-		sessions:   map[string]portalSession{},
+		app:      portalApp,
+		now:      portalFixedNow,
+		sessions: map[string]portalSession{},
 	}
 	testServer := httptest.NewServer(server.routes())
 	defer testServer.Close()
@@ -59,6 +56,12 @@ func TestStudentPortalWorkflow(t *testing.T) {
 	if login["mustChangePassword"] != false {
 		t.Fatalf("expected mustChangePassword false, got %#v", login["mustChangePassword"])
 	}
+	if login["username"] != "alice.brown" {
+		t.Fatalf("expected login to return username alice.brown, got %#v", login["username"])
+	}
+	if login["studentId"] != float64(1) {
+		t.Fatalf("expected login to return studentId 1, got %#v", login["studentId"])
+	}
 
 	var me map[string]any
 	status = portalJSONRequest(t, client, http.MethodGet, testServer.URL+"/api/me", nil, &me)
@@ -69,22 +72,44 @@ func TestStudentPortalWorkflow(t *testing.T) {
 		t.Fatalf("expected username alice.brown, got %#v", me["username"])
 	}
 
-	var grades portalStudentSnapshot
+	// /api/grades matches the VPS portal shape: {studentId, courses: [...]},
+	// built live from the local database.
+	var grades struct {
+		StudentID int                   `json:"studentId"`
+		Courses   []portalStudentCourse `json:"courses"`
+	}
 	status = portalJSONRequest(t, client, http.MethodGet, testServer.URL+"/api/grades", nil, &grades)
 	if status != http.StatusOK {
 		t.Fatalf("grades status: got %d", status)
 	}
-	if grades.FirstName != "Alice" || len(grades.Assignments) != 2 {
-		t.Fatalf("unexpected grades payload: %+v", grades)
+	if grades.StudentID != 1 {
+		t.Fatalf("expected studentId 1, got %d", grades.StudentID)
 	}
-	if grades.Assignments[1].MaxPoints != 100 {
-		t.Fatalf("expected final max points 100, got %d", grades.Assignments[1].MaxPoints)
+	if len(grades.Courses) != 1 {
+		t.Fatalf("expected 1 course, got %d", len(grades.Courses))
 	}
-	if grades.WeightedTotalLabel == "" {
+	course := grades.Courses[0]
+	if course.CourseYearID != 1 || course.TermID != 1 {
+		t.Fatalf("unexpected course ids: %+v", course)
+	}
+	if course.CourseName != "APCSA" || course.TermName != "Fall 2026" {
+		t.Fatalf("unexpected course names: %+v", course)
+	}
+	if course.PublishedAt == "" {
+		t.Fatalf("expected publishedAt on course entry")
+	}
+	snapshot := course.Snapshot
+	if snapshot.FirstName != "Alice" || len(snapshot.Assignments) != 2 {
+		t.Fatalf("unexpected grades payload: %+v", snapshot)
+	}
+	if snapshot.Assignments[1].MaxPoints != 100 {
+		t.Fatalf("expected final max points 100, got %d", snapshot.Assignments[1].MaxPoints)
+	}
+	if snapshot.WeightedTotalLabel == "" {
 		t.Fatalf("expected weighted total label in grades payload")
 	}
-	if grades.Assignments[0].Flags == nil || len(grades.Assignments[0].Flags) != 2 {
-		t.Fatalf("expected multiple flags for first assignment, got %+v", grades.Assignments[0].Flags)
+	if snapshot.Assignments[0].Flags == nil || len(snapshot.Assignments[0].Flags) != 2 {
+		t.Fatalf("expected multiple flags for first assignment, got %+v", snapshot.Assignments[0].Flags)
 	}
 
 	resp, err := client.Get(testServer.URL + "/")
@@ -97,6 +122,9 @@ func TestStudentPortalWorkflow(t *testing.T) {
 		t.Fatalf("read portal page: %v", err)
 	}
 	page := string(body)
+	if !strings.Contains(page, "Student Grades Portal") {
+		t.Fatalf("expected legacy fallback page without portal-web/dist")
+	}
 	if strings.Contains(page, "Keeping password change inline is enough for now") {
 		t.Fatalf("internal password guidance text leaked into user page")
 	}
@@ -144,6 +172,166 @@ func TestStudentPortalWorkflow(t *testing.T) {
 	}, &login)
 	if status != http.StatusOK {
 		t.Fatalf("new password login status: got %d", status)
+	}
+}
+
+// TestPortalServerServesSPAWhenDistExists verifies that the preview serves the
+// built React SPA: static assets directly and index.html for client-side routes.
+func TestPortalServerServesSPAWhenDistExists(t *testing.T) {
+	portalApp, home := newPortalTestApp(t)
+	defer portalApp.Close()
+	seedPortalData(t, home)
+
+	portalApp.v.Set("context.year", "2026-27")
+	portalApp.v.Set("context.term_id", 1)
+	portalApp.v.Set("context.course_year_id", 1)
+	if err := portalApp.v.WriteConfig(); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	dist := filepath.Join(t.TempDir(), "dist")
+	if err := os.MkdirAll(filepath.Join(dist, "assets"), 0o755); err != nil {
+		t.Fatalf("mkdir dist: %v", err)
+	}
+	indexHTML := `<!doctype html><html><body><div id="root"></div><script src="/assets/app.js"></script></body></html>`
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte(indexHTML), 0o644); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dist, "assets", "app.js"), []byte("console.log('spa')"), 0o644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	server := &portalServer{app: portalApp, staticDir: dist, now: portalFixedNow, sessions: map[string]portalSession{}}
+	testServer := httptest.NewServer(server.routes())
+	defer testServer.Close()
+
+	// Client-side routes and the root all get the SPA index.html.
+	for _, path := range []string{"/", "/what-if", "/change-password", "/no-such-route"} {
+		resp, err := http.Get(testServer.URL + path)
+		if err != nil {
+			t.Fatalf("get %s: %v", path, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get %s: status %d", path, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), `id="root"`) {
+			t.Fatalf("expected SPA index.html for %s, got:\n%s", path, body)
+		}
+	}
+
+	// Real static files are served with their content.
+	resp, err := http.Get(testServer.URL + "/assets/app.js")
+	if err != nil {
+		t.Fatalf("get asset: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read asset: %v", err)
+	}
+	if string(body) != "console.log('spa')" {
+		t.Fatalf("unexpected asset body: %s", body)
+	}
+
+	// API routes still answer as JSON, not index.html.
+	status := portalJSONRequest(t, newPortalHTTPClient(t), http.MethodGet, testServer.URL+"/api/me", nil, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for /api/me without session, got %d", status)
+	}
+
+	// Unknown API paths (e.g. admin routes, which the preview does not have)
+	// get a JSON 404, never the index.html fallback.
+	status = portalJSONRequest(t, newPortalHTTPClient(t), http.MethodGet, testServer.URL+"/api/admin/courses", nil, &map[string]any{})
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown /api path, got %d", status)
+	}
+}
+
+// TestLocatePortalWebDist verifies the built frontend is discovered relative to
+// the working directory and that "" is returned when it is missing.
+func TestLocatePortalWebDist(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+
+	if got := locatePortalWebDist(); got != "" {
+		t.Fatalf("expected no dist found, got %q", got)
+	}
+
+	dist := filepath.Join(tmp, "portal-web", "dist")
+	if err := os.MkdirAll(dist, 0o755); err != nil {
+		t.Fatalf("mkdir dist: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	if got := locatePortalWebDist(); got != dist {
+		t.Fatalf("expected %q, got %q", dist, got)
+	}
+}
+
+// TestPortalCoursesForStudentMultipleCourses verifies /api/grades lists one
+// entry per enrolled course, ordered by course name.
+func TestPortalCoursesForStudentMultipleCourses(t *testing.T) {
+	portalApp, home := newPortalTestApp(t)
+	defer portalApp.Close()
+	seedPortalData(t, home)
+
+	conn, err := db.Open(filepath.Join(home, "grades.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	statements := []string{
+		`INSERT INTO terms(term_id, name, start_date, end_date) VALUES (2, 'Spring 2027', '2027-01-10', '2027-06-20')`,
+		`INSERT INTO courses(course_id, name) VALUES (2, 'APCSP')`,
+		`INSERT INTO course_years(course_year_id, course_id, name) VALUES (2, 2, 'APCSP 2026-27')`,
+		`INSERT INTO course_year_terms(course_year_id, term_id) VALUES (2, 2)`,
+		`INSERT INTO sections(section_id, course_year_id, name) VALUES (2, 2, '12C')`,
+		`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (2, 1, 2, '2027-01-10', 'active')`,
+	}
+	for _, stmt := range statements {
+		if _, err := conn.Exec(stmt); err != nil {
+			conn.Close()
+			t.Fatalf("seed stmt failed: %v", err)
+		}
+	}
+	conn.Close()
+
+	portalApp.v.Set("context.year", "2026-27")
+	portalApp.v.Set("context.term_id", 1)
+	portalApp.v.Set("context.course_year_id", 1)
+	if err := portalApp.v.WriteConfig(); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	courses, err := portalApp.portalCoursesForStudent(1)
+	if err != nil {
+		t.Fatalf("portal courses for student: %v", err)
+	}
+	if len(courses) != 2 {
+		t.Fatalf("expected 2 courses, got %d", len(courses))
+	}
+	if courses[0].CourseName != "APCSA" || courses[1].CourseName != "APCSP" {
+		t.Fatalf("expected courses ordered by name, got %q then %q", courses[0].CourseName, courses[1].CourseName)
+	}
+	if courses[0].Snapshot.FirstName != "Alice" || len(courses[0].Snapshot.Assignments) != 2 {
+		t.Fatalf("unexpected APCSA snapshot: %+v", courses[0].Snapshot)
+	}
+	if courses[1].Snapshot.StudentID != 1 || len(courses[1].Snapshot.Assignments) != 0 {
+		t.Fatalf("unexpected APCSP snapshot: %+v", courses[1].Snapshot)
+	}
+
+	// A student enrolled in only one course gets only that course.
+	courses, err = portalApp.portalCoursesForStudent(2)
+	if err != nil {
+		t.Fatalf("portal courses for student 2: %v", err)
+	}
+	if len(courses) != 1 || courses[0].CourseName != "APCSA" {
+		t.Fatalf("expected only APCSA for student 2, got %+v", courses)
 	}
 }
 
@@ -283,18 +471,14 @@ func TestPortalImprovementTipsRespectShowInOverview(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if err := portalApp.PublishStudentPortal(""); err != nil {
-		t.Fatalf("publish portal: %v", err)
-	}
-
-	gradesJSON, err := os.ReadFile(filepath.Join(home, "..", "gradesPublished", "students", "1.json"))
+	snapshot, err := portalApp.buildPortalCourseSnapshot(1, 1)
 	if err != nil {
-		t.Fatalf("read grades snapshot: %v", err)
+		t.Fatalf("build portal course snapshot: %v", err)
 	}
-	var grades portalStudentSnapshot
-	if err := json.Unmarshal(gradesJSON, &grades); err != nil {
-		t.Fatalf("decode grades snapshot: %v", err)
+	if len(snapshot.Students) != 1 {
+		t.Fatalf("expected 1 student snapshot, got %d", len(snapshot.Students))
 	}
+	grades := snapshot.Students[0]
 
 	if len(grades.Categories) != 2 {
 		t.Fatalf("expected 2 categories, got %d", len(grades.Categories))

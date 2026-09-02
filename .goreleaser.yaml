@@ -12,6 +12,8 @@ builds:
     binary: grades
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/davidpopovici01/grades/cmd.Version={{ .Version }}
     goos:
       - windows
       - darwin

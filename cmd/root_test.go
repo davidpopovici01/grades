@@ -4,8 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -572,6 +575,7 @@ func TestCategoryImportDoesNotCreateCaseInsensitiveDuplicateCategory(t *testing.
 }
 
 func TestGradesGradebookStatsAndExport(t *testing.T) {
+
 	env := newTestEnv(t)
 	seedBaseData(t, env)
 	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}, {"Bob", "Zhang", "3002"}})
@@ -594,7 +598,7 @@ func TestGradesGradebookStatsAndExport(t *testing.T) {
 	assertContains(t, gradesOut, "Alice Brown")
 	assertContains(t, gradesOut, "Uncurved average:\t39.5%")
 	assertContains(t, gradesOut, "Curved average:\t\t0.0%")
-	assertContains(t, gradesOut, "79 (redo)")
+	assertContains(t, gradesOut, "79.0 (redo)")
 	assertContains(t, gradesOut, "counts as 0.0%")
 	assertContains(t, gradesOut, "Bob Zhang")
 	assertContains(t, gradesOut, "M")
@@ -1159,7 +1163,7 @@ func TestMissingDefaultsMarkLateAndLatePersistence(t *testing.T) {
 	assertContains(t, finalGrades, "Alice Brown")
 	assertContains(t, finalGrades, "P")
 	assertContains(t, finalGrades, "Bob Zhang")
-	assertContains(t, finalGrades, "8L")
+	assertContains(t, finalGrades, "8.0L")
 }
 
 func TestMarkLateUndoRestoresMissing(t *testing.T) {
@@ -1660,11 +1664,11 @@ func TestMakeupListAndEnterForMissingAndLateWork(t *testing.T) {
 	assertContains(t, list, "HW2")
 
 	enter := mustRun(t, env, "2\n8\n", "make-up", "enter", "Alice")
-	assertContains(t, enter, "Recorded 8 for Alice Brown on HW2")
+	assertContains(t, enter, "Recorded 8.0 for Alice Brown on HW2")
 
 	mustRun(t, env, "", "use", "assignment", "HW2")
 	show := mustRun(t, env, "", "show")
-	assertContains(t, show, "8L")
+	assertContains(t, show, "8.0L")
 }
 
 func TestMakeupPassForSingleAssignment(t *testing.T) {
@@ -1706,10 +1710,34 @@ func TestMakeupEnterForSingleAssignmentStillPromptsForChoice(t *testing.T) {
 	out := mustRun(t, env, "1\n8\n", "make-up", "enter", "Alice")
 	assertContains(t, out, "Make-up assignments for Alice Brown")
 	assertContains(t, out, "Choose assignment:")
-	assertContains(t, out, "Recorded 8 for Alice Brown on HW1")
+	assertContains(t, out, "Recorded 8.0 for Alice Brown on HW1")
 
 	show := mustRun(t, env, "", "show")
 	assertContains(t, show, "8")
+}
+
+func TestMakeupListHidesAssignmentsBeforeOverviewCutoff(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "HW1\n10\nHomework\nnew\ny\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW1")
+	mustRun(t, env, "ali\nm\n\n", "enter")
+	mustRun(t, env, "HW2\n10\nHomework\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "HW2")
+	mustRun(t, env, "ali\nl\n\n", "enter")
+
+	mustRun(t, env, "", "overview", "--set-after", "1")
+
+	list := mustRun(t, env, "", "make-up", "list", "Alice")
+	assertContains(t, list, "Make-up assignments for Alice Brown")
+	assertContains(t, list, "HW2")
+	assertNotContains(t, list, "HW1")
 }
 
 func TestStudentsShowUsesNameLookupAndShowsDetailedBreakdown(t *testing.T) {
@@ -2248,7 +2276,7 @@ func TestLowScoreSetsRedoFlagForPassRateAssignments(t *testing.T) {
 
 	show := mustRun(t, env, "", "grades", "show")
 	assertContains(t, show, "Alice Brown")
-	assertContains(t, show, "7 (redo)")
+	assertContains(t, show, "7.0 (redo)")
 	assertContains(t, show, "counts as 0.0%")
 }
 
@@ -2325,7 +2353,7 @@ func TestLateOnlyAndScorePlusRedoInputs(t *testing.T) {
 	assertContains(t, show, "Alice Brown")
 	assertContains(t, show, "L")
 	assertContains(t, show, "Bob Zhang")
-	assertContains(t, show, "19 (redo)")
+	assertContains(t, show, "19.0 (redo)")
 	assertContains(t, show, "Uncurved average:\t47.5%")
 	assertContains(t, show, "Curved average:\t\t45.0%")
 }
@@ -2351,8 +2379,8 @@ func TestEnterLastNameModePromptsInOrder(t *testing.T) {
 	if alicePrompt > bobPrompt {
 		t.Fatalf("expected Alice Brown prompt before Bob Zhang prompt:\n%s", out)
 	}
-	assertContains(t, out, "Recorded 8 for Alice Brown")
-	assertContains(t, out, "Recorded 9 for Bob Zhang")
+	assertContains(t, out, "Recorded 8.0 for Alice Brown")
+	assertContains(t, out, "Recorded 9.0 for Bob Zhang")
 
 	show := mustRun(t, env, "", "show")
 	assertContains(t, show, "Alice Brown")
@@ -2406,7 +2434,7 @@ func TestRedoFlagStaysAfterHigherScoreUntilCleared(t *testing.T) {
 	mustRun(t, env, "ali\n9\n\n", "grades", "enter")
 
 	show := mustRun(t, env, "", "grades", "show")
-	assertContains(t, show, "9 (redo)")
+	assertContains(t, show, "9.0 (redo)")
 
 	mustRun(t, env, "", "grades", "clear-redo", "ali")
 	showAfterClear := mustRun(t, env, "", "grades", "show")
@@ -2695,7 +2723,7 @@ func TestGradebookShowsPassingNumericGradesInGreen(t *testing.T) {
 
 	gradebook := mustRun(t, env, "", "gradebook")
 	assertContains(t, gradebook, "Alice Brown")
-	assertContains(t, gradebook, "\x1b[32m8\x1b[0m")
+	assertContains(t, gradebook, "\x1b[32m8.0\x1b[0m")
 }
 
 func TestGradebookWrapsWideAssignmentSetsIntoChunks(t *testing.T) {
@@ -2997,7 +3025,7 @@ func TestDashboardShowsHelpfulNextStepHints(t *testing.T) {
 	assertContains(t, dashboardWithAssignment, "grades show to review the current assignment")
 }
 
-func TestPublishCommandWritesStudentPortalSnapshots(t *testing.T) {
+func TestPublishCommandPushesStudentPortalToConfiguredURL(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
 	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}, {"Bob", "Zhang", "3002"}})
@@ -3012,23 +3040,65 @@ func TestPublishCommandWritesStudentPortalSnapshots(t *testing.T) {
 	mustRun(t, env, "ali\n88\nbz\n91\n\n", "grades", "enter")
 	mustRun(t, env, "", "web", "accounts", "init", "TempPass123")
 
-	out := mustRun(t, env, "", "publish")
-	assertContains(t, out, "Published student portal")
-	assertContains(t, out, "Published 2 student snapshot(s)")
+	server, publishBody := newFakePortalServer(t)
+	defer server.Close()
+	writePortalURLConfig(t, env, server.URL)
 
-	indexPath := filepath.Join(env.home, "..", "gradesPublished", "index.json")
-	studentPath := filepath.Join(env.home, "..", "gradesPublished", "students", "1.json")
-	indexData, err := os.ReadFile(indexPath)
-	if err != nil {
-		t.Fatalf("read published index: %v", err)
+	out := mustRun(t, env, "", "publish")
+	assertContains(t, out, "Published student portal to "+server.URL+"/api/admin/publish")
+	assertContains(t, out, "Published 2 student snapshot(s)")
+	assertContains(t, out, "Exported 2 account(s)")
+
+	var payload struct {
+		Accounts []map[string]any `json:"accounts"`
+		Course   struct {
+			CourseYearID   int    `json:"courseYearId"`
+			TermID         int    `json:"termId"`
+			CourseName     string `json:"courseName"`
+			CourseYearName string `json:"courseYearName"`
+		} `json:"course"`
+		Students []struct {
+			StudentID int             `json:"studentId"`
+			Snapshot  json.RawMessage `json:"snapshot"`
+		} `json:"students"`
 	}
-	studentData, err := os.ReadFile(studentPath)
-	if err != nil {
-		t.Fatalf("read published student snapshot: %v", err)
+	if err := json.Unmarshal(publishBody(), &payload); err != nil {
+		t.Fatalf("decode publish payload: %v", err)
 	}
-	assertContains(t, string(indexData), `"studentCount": 2`)
-	assertContains(t, string(studentData), `"username": "alice.brown"`)
-	assertContains(t, string(studentData), `"weightedTotalLabel": "88.0%"`)
+	if payload.Course.CourseYearID != 1 || payload.Course.TermID != 1 || payload.Course.CourseName != "APCSA" {
+		t.Fatalf("unexpected course info in payload: %+v", payload.Course)
+	}
+	if payload.Course.CourseYearName != "2026-27" {
+		t.Fatalf("expected courseYearName 2026-27 in payload, got %+v", payload.Course)
+	}
+	if len(payload.Accounts) != 2 {
+		t.Fatalf("expected 2 accounts in payload, got %d", len(payload.Accounts))
+	}
+	if len(payload.Students) != 2 {
+		t.Fatalf("expected 2 student snapshots in payload, got %d", len(payload.Students))
+	}
+	var aliceSnapshot string
+	for _, student := range payload.Students {
+		if student.StudentID == 1 {
+			aliceSnapshot = string(student.Snapshot)
+		}
+	}
+	assertContains(t, aliceSnapshot, `"username":"alice.brown"`)
+	assertContains(t, aliceSnapshot, `"weightedTotalLabel":"88.0%"`)
+}
+
+func TestPublishCommandWithoutPortalURLSkips(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+
+	out := mustRun(t, env, "", "publish")
+	assertContains(t, out, "portal.url is not configured; nothing to publish")
+	assertContains(t, out, "grades web serve")
 }
 
 func TestAssignmentExportAlsoPublishesStudentPortal(t *testing.T) {
@@ -3046,17 +3116,85 @@ func TestAssignmentExportAlsoPublishesStudentPortal(t *testing.T) {
 	mustRun(t, env, "ali\n92\n\n", "grades", "enter")
 	mustRun(t, env, "", "web", "accounts", "init", "TempPass123")
 
+	server, publishBody := newFakePortalServer(t)
+	defer server.Close()
+	writePortalURLConfig(t, env, server.URL)
+
 	exportPath := filepath.Join(env.home, "midterm.csv")
 	out := mustRun(t, env, "y\n", "assignments", "export", exportPath)
 	assertContains(t, out, "Exported grades")
-	assertContains(t, out, "Published student portal")
+	assertContains(t, out, "Published student portal to "+server.URL+"/api/admin/publish")
+	assertContains(t, string(publishBody()), `"weightedTotalLabel":"92.0%"`)
+}
 
-	studentPath := filepath.Join(env.home, "..", "gradesPublished", "students", "1.json")
-	data, err := os.ReadFile(studentPath)
-	if err != nil {
-		t.Fatalf("read published student snapshot after export: %v", err)
+// newFakePortalServer returns an httptest server that records the last
+// /api/admin/publish request body.
+func newFakePortalServer(t *testing.T) (*httptest.Server, func() []byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var body []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/admin/publish" {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, `{"error":"read failed"}`, http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		body = data
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	return server, func() []byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return body
 	}
-	assertContains(t, string(data), `"weightedTotalLabel": "92.0%"`)
+}
+
+func writePortalURLConfig(t *testing.T, env testEnv, url string) {
+	t.Helper()
+	configPath := filepath.Join(env.home, "config.yaml")
+	existing, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read config: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
+	replaced := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "url:") {
+			indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+			lines[i] = indent + `url: "` + url + `"`
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		lines = append(lines, "portal:", `  url: "`+url+`"`)
+	}
+	if err := os.WriteFile(configPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func TestWebTokenPrintsConfiguredTeacherToken(t *testing.T) {
+	env := newTestEnv(t)
+	config := "portal:\n  teacher_token: secret-token-123\n"
+	if err := os.WriteFile(filepath.Join(env.home, "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	out := mustRun(t, env, "", "web", "token")
+	assertContains(t, out, "secret-token-123")
+}
+
+func TestWebTokenWithoutConfigFails(t *testing.T) {
+	env := newTestEnv(t)
+	_, errMsg := runWithError(t, env, "", "web", "token")
+	assertContains(t, errMsg, "portal.teacher_token")
 }
 
 func TestWebAccountsResetAcceptsMultiWordStudentReference(t *testing.T) {

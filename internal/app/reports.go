@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/davidpopovici01/grades/internal/portalauth"
 )
 
 type studyReportCandidate struct {
@@ -106,13 +108,13 @@ func (a *App) CreateStudyReport(studentRef, output string) error {
 		return err
 	}
 	if err := writeFilledStudyReport(templatePath, output, studyReportData{
-		StudentName:   student.FirstName + " " + student.LastName,
-		Date:          time.Now().Format("2006-01-02"),
-		Subject:       courseName,
-		TeacherName:   "Mr Popovici",
-		CurrentGrade:  fmt.Sprintf("%.1f%% (%s)", candidate.CurrentPercent, candidate.LetterGrade),
-		Improvements:  candidate.Improvements,
-		TeacherNotes:  candidate.Comments,
+		StudentName:  student.FirstName + " " + student.LastName,
+		Date:         time.Now().Format("2006-01-02"),
+		Subject:      courseName,
+		TeacherName:  "Mr Popovici",
+		CurrentGrade: fmt.Sprintf("%.1f%% (%s)", candidate.CurrentPercent, candidate.LetterGrade),
+		Improvements: candidate.Improvements,
+		TeacherNotes: candidate.Comments,
 	}); err != nil {
 		return err
 	}
@@ -183,7 +185,7 @@ func (a *App) studyReportMetrics(student Student) (studyReportMetrics, error) {
 	}
 	metrics := studyReportMetrics{
 		currentPercent: currentPercent,
-		letterGrade:    americanLetterGrade(currentPercent),
+		letterGrade:    portalauth.AmericanLetterGrade(currentPercent),
 	}
 	for _, detail := range details {
 		if hasOutstandingStudyReportRedo(detail.Grade) {
@@ -358,38 +360,6 @@ func averagePercentStrings(values map[int]string) float64 {
 		return 0
 	}
 	return total / float64(count)
-}
-
-// americanLetterGrade is kept for backward compatibility.
-// Prefer portalauth.AmericanLetterGrade for new code.
-func americanLetterGrade(percent float64) string {
-	// Inline copy to avoid import cycle (reports.go imports app types, not portalauth).
-	switch {
-	case percent >= 93:
-		return "A"
-	case percent >= 90:
-		return "A-"
-	case percent >= 87:
-		return "B+"
-	case percent >= 83:
-		return "B"
-	case percent >= 80:
-		return "B-"
-	case percent >= 77:
-		return "C+"
-	case percent >= 73:
-		return "C"
-	case percent >= 70:
-		return "C-"
-	case percent >= 67:
-		return "D+"
-	case percent >= 63:
-		return "D"
-	case percent >= 60:
-		return "D-"
-	default:
-		return "F"
-	}
 }
 
 func isTestLike(title, category string) bool {

@@ -320,6 +320,17 @@ Apply repairs:
 grades system repair apply
 ```
 
+## Student Portal
+
+Students can view their grades in a web portal. The portal runs as a small Go server with a React frontend; the CLI pushes snapshots to it:
+
+```powershell
+grades web accounts init
+grades publish
+```
+
+`grades export` publishes automatically when the portal is configured. For a local preview, run `grades web serve`. Setup and deployment: [`docs/portal-deployment.md`](docs/portal-deployment.md).
+
 ## Documentation
 
 Detailed docs live in [`docs/`](docs):
@@ -328,6 +339,8 @@ Detailed docs live in [`docs/`](docs):
 - [`docs/import-export.md`](docs/import-export.md)
 - [`docs/grading-rules.md`](docs/grading-rules.md)
 - [`docs/command-reference.md`](docs/command-reference.md)
+- [`docs/portal-deployment.md`](docs/portal-deployment.md)
+- [`docs/roadmap.md`](docs/roadmap.md)
 - [`docs/releasing.md`](docs/releasing.md)
 
 ## Release Automation

@@ -7,8 +7,17 @@ export function ImprovementSummary({ grades }) {
   if (!grades) return null;
 
   const total = grades.weightedTotal;
-  const activeCount = grades.activeCategoryCount;
-  const totalCategories = grades.categories?.length || 0;
+
+  if (total === null || total === undefined) {
+    return (
+      <div className="rounded-xl border p-5 bg-gray-50 border-gray-200">
+        <h3 className="font-semibold text-lg text-gray-700">No grades yet</h3>
+        <p className="text-sm text-gray-500 mt-1">
+          Your grade will appear here once your teacher starts entering scores.
+        </p>
+      </div>
+    );
+  }
 
   // Filter to assignments after cutoff (the ones that matter now)
   const relevantAssignments = grades.assignments?.filter((a) => !a.isBeforeCutoff) || [];

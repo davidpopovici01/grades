@@ -13,6 +13,8 @@
 | Test popup fix | Done | `GRADES_NO_OPEN` prevents Windows from opening CSV files during tests |
 | Dashboard cutoff indicator | Done | `grades` dashboard shows active overview cutoff |
 | PowerShell test helper | Done | `grades-test` function added to profile |
+| `grades version` subcommand | Done | Version injected at build time via `-ldflags`; goreleaser config updated |
+| Student portal cloud deployment | Done | Go server + SQLite on a VPS behind Caddy/HTTPS; CLI pushes snapshots over HTTP (`grades publish`) |
 
 ### Existing Features
 
@@ -21,8 +23,8 @@
 - Grading flags: late, missing, redo, cheat, pass
 - Roster CSV import, category CSV import
 - PowerSchool-style export with export tracking
-- Student portal (local-only): auth, grade view, what-if forecasting
-- Database backup and repair tools
+- Student portal: auth, grade view, what-if forecasting — deployed on a VPS (HTTPS, SQLite store, teacher admin UI); see [`portal-deployment.md`](portal-deployment.md)
+- Database backup and repair tools, including remote backup to the portal server
 - Release automation via GitHub Actions + Goreleaser
 
 ---
@@ -33,16 +35,15 @@
 ┌─────────────────────────────────────────────┐
 │  Teacher's computer                          │
 │  ├── grades CLI (Cobra + SQLite)            │
-│  ├── SQLite database (~/.grades/grades.db)  │
-│  └── grades.exe                             │
+│  └── SQLite database (~/.grades/grades.db)  │
 └─────────────────────────────────────────────┘
               │
-              ▼ publish / deploy
+              ▼ grades publish (HTTPS POST /api/admin/publish)
 ┌─────────────────────────────────────────────┐
-│  Student-facing (future)                     │
-│  ├── Static JSON snapshots (gradesPublish)  │
-│  ├── Web portal (local 127.0.0.1:8080)      │
-│  └── Cloud server (planned Phase 2)         │
+│  VPS (cs.lairdmath.com)                      │
+│  ├── Caddy (Let's Encrypt HTTPS)            │
+│  ├── portal server (cmd/portal, SQLite)     │
+│  └── React SPA (portal-web/dist)            │
 └─────────────────────────────────────────────┘
 ```
 
@@ -51,9 +52,11 @@
 | Package | Responsibility |
 |---------|---------------|
 | `cmd/` | Cobra CLI wiring |
+| `cmd/portal/` | Portal server entrypoint |
 | `internal/app/` | Business logic: grades, students, assignments, context, web portal, reports |
+| `internal/portalserver/` | Portal HTTP server: auth, JSON API, static SPA |
 | `internal/db/` | SQLite connection with foreign keys enforced |
-| `internal/migrate/` | Schema migrations (10 versions) |
+| `internal/migrate/` | Schema migrations (13 versions) |
 | `internal/excelreport/` | Python-based Excel report generation |
 
 ---
@@ -64,28 +67,23 @@
 
 `grades update` should check for newer versions and self-install.
 
-- Add `version` subcommand (injected at build time via `ldflags`)
+- ~~Add `version` subcommand (injected at build time via `ldflags`)~~ — done
+- ~~Update `.goreleaser.yaml` to inject version at build time~~ — done
 - Host a `version.json` on a China-friendly mirror (Gitee or Tencent COS)
 - Download and replace `grades.exe` in-place on Windows
-- Update `.goreleaser.yaml` to inject version at build time
 
-### 2. Deploy Existing Portal
+### 2. Deploy Existing Portal — Done
 
-The existing `portalServer` (`internal/app/web.go`) already supports:
-- Student login with passwords
-- Grade viewing
-- What-if grade forecasting (client-side JS)
+The portal is live on a VPS behind Caddy with automatic HTTPS:
 
-**To make it accessible:**
-- Bind to `0.0.0.0` instead of `127.0.0.1`
-- Add HTTPS (Let's Encrypt or reverse proxy)
-- Add `grades cloud-publish` to push snapshots to the server
-- Deploy to a single cloud server (Tencent Lighthouse recommended)
+- Server: `cmd/portal` (Go + SQLite), managed by systemd (`scripts/portal.service`)
+- Frontend: React SPA built from `portal-web/`, served by the portal binary
+- Data sync: `grades publish` / `grades export` push the course snapshot over HTTP (`POST /api/admin/publish`, bearer-token auth) — no SSH or file uploads involved
+- Accounts: managed on the laptop (`grades web accounts init|list|reset`), pushed with each publish
+- Admin UI at `/admin` (course list, per-student password reset, unpublish)
+- Deployments: `scripts/deploy.sh`; setup: `scripts/server-setup.sh`
 
-**Hosting decision:**
-- Mainland China + public IP = cheapest, fastest, no ICP备案 needed
-- Hong Kong = 2-3x more expensive
-- Friend's server = free if available and proven to work in China
+Details: [`portal-deployment.md`](portal-deployment.md)
 
 ---
 

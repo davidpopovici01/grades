@@ -45,8 +45,8 @@ func printStats(out io.Writer, stats Stats) error {
 		return err
 	}
 	fmt.Fprintf(out, "Average: %.1f\n", stats.Average)
-	fmt.Fprintf(out, "Highest: %.0f\n", stats.Highest)
-	fmt.Fprintf(out, "Lowest: %.0f\n", stats.Lowest)
+	fmt.Fprintf(out, "Highest: %.1f\n", stats.Highest)
+	fmt.Fprintf(out, "Lowest: %.1f\n", stats.Lowest)
 	return nil
 }
 

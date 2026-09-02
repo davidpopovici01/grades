@@ -1,47 +1,58 @@
+# Run the student portal server locally for testing.
+# Serves the React frontend from portal-web/dist with a throwaway SQLite DB.
 $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
 Set-Location $repo
 
-$DATA_DIR = if ($args[0]) { $args[0] } else { "./data" }
 $STATIC_DIR = "./portal-web/dist"
+$LOCAL_DIR = "./dist/portal-local"
 
 # Build frontend if needed
 if (-not (Test-Path $STATIC_DIR)) {
     Write-Host "Building frontend..."
-    Set-Location portal-web
-    npm run build
-    Set-Location $repo
+    Push-Location portal-web
+    try {
+        npm ci
+        npm run build
+    }
+    finally {
+        Pop-Location
+    }
 }
 
-# Build portal binary for Windows
-Write-Host "Building portal binary..."
-go build -o dist/portal-local.exe ./cmd/portal
+New-Item -ItemType Directory -Force -Path $LOCAL_DIR | Out-Null
 
-# Generate test JWT secret
-$SECRET_FILE = ".jwt-secret-local"
+# Generate a test JWT secret and teacher token if not present
+$SECRET_FILE = "$LOCAL_DIR/jwt-secret"
+$TOKEN_FILE = "$LOCAL_DIR/teacher-token"
 if (-not (Test-Path $SECRET_FILE)) {
-    $secret = -join ((1..32) | ForEach-Object { [Convert]::ToBase64String([byte[]](Get-Random -Maximum 256))[0] })
-    [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($secret)) | Set-Content $SECRET_FILE
-    Write-Host "Generated test JWT secret: $SECRET_FILE"
+    [Convert]::ToBase64String((1..32 | ForEach-Object { [byte](Get-Random -Maximum 256) })) | Set-Content $SECRET_FILE -NoNewline
 }
-
-# Publish grades if needed
-if (-not (Test-Path "$DATA_DIR/accounts.json")) {
-    Write-Host "Publishing grades to $DATA_DIR..."
-    go run ./cmd/grades web publish $DATA_DIR
+if (-not (Test-Path $TOKEN_FILE)) {
+    [Convert]::ToBase64String((1..32 | ForEach-Object { [byte](Get-Random -Maximum 256) })) | Set-Content $TOKEN_FILE -NoNewline
 }
+$TOKEN = (Get-Content $TOKEN_FILE -Raw).Trim()
 
 Write-Host ""
 Write-Host "Starting local portal server..."
-Write-Host "  Data dir:   $DATA_DIR"
-Write-Host "  Static dir: $STATIC_DIR"
-Write-Host "  URL:        http://localhost:8080"
+Write-Host "  URL:           http://localhost:8080"
+Write-Host "  Admin UI:      http://localhost:8080/admin"
+Write-Host "  Teacher token: $TOKEN"
+Write-Host "  Database:      $LOCAL_DIR/grades-portal.db"
+Write-Host ""
+Write-Host "To push grades to this server, set in ~/.grades/config.yaml:"
+Write-Host "  portal.url: http://localhost:8080"
+Write-Host "  portal.teacher_token: $TOKEN"
+Write-Host "then run: grades publish"
+Write-Host ""
+Write-Host "For a quick preview without this server, use: grades web serve"
 Write-Host ""
 
-$env:PORTAL_DATA_DIR = $DATA_DIR
+$env:PORTAL_DB_PATH = "$LOCAL_DIR/grades-portal.db"
 $env:PORTAL_STATIC_DIR = $STATIC_DIR
 $env:PORTAL_JWT_SECRET_FILE = $SECRET_FILE
+$env:PORTAL_TEACHER_TOKEN_FILE = $TOKEN_FILE
 $env:PORTAL_ADDR = "localhost:8080"
 $env:PORTAL_COOKIE_SECURE = "false"
 
-& ./dist/portal-local.exe
+go run ./cmd/portal
