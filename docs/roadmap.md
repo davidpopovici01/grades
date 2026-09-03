@@ -40,7 +40,7 @@
               │
               ▼ grades publish (HTTPS POST /api/admin/publish)
 ┌─────────────────────────────────────────────┐
-│  VPS (cs.lairdmath.com)                      │
+│  VPS (grades.mrpopovici.com)                      │
 │  ├── Caddy (Let's Encrypt HTTPS)            │
 │  ├── portal server (cmd/portal, SQLite)     │
 │  └── React SPA (portal-web/dist)            │

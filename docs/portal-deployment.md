@@ -1,6 +1,6 @@
 # Portal Deployment Guide
 
-This guide covers deploying the student portal to the VPS (cs.lairdmath.com).
+This guide covers deploying the student portal to the VPS (grades.mrpopovici.com).
 
 ## Overview
 
@@ -25,22 +25,24 @@ grades export / grades publish  ──HTTPS──▶  Caddy (Let's Encrypt)
 ## Prerequisites
 
 - SSH access to the VPS
-- An A record pointing `cs.lairdmath.com` at the server's IP
-- Caddy on the VPS (installed by `server-setup.sh` if missing); it obtains the Let's Encrypt certificate automatically
+- An A record pointing `grades.mrpopovici.com` at the server's IP
+- Caddy on the VPS (any install — apt, Docker, etc.); it obtains the Let's Encrypt certificate automatically
 
 ## One-Time Server Setup
 
 Copy the repo (or at least `scripts/`) to the VPS, then run:
 
 ```bash
-sudo ./scripts/server-setup.sh
+sudo ./scripts/server-setup.sh                 # defaults to grades.mrpopovici.com
+sudo ./scripts/server-setup.sh portal.example.com   # or pass your domain
 ```
 
 The script:
 
 - creates the `portal` system user and `/opt/portal/static`
-- generates `/opt/portal/.jwt-secret` (session signing) and `/opt/portal/.teacher-token` (admin bearer token), both `chmod 600`, owned by `portal`
-- installs Caddy if missing and writes a Caddyfile proxying `cs.lairdmath.com` to `localhost:8080`
+- generates `/opt/portal/.jwt-secret` (session signing) and `/opt/portal/.teacher-token` (admin bearer token), both `chmod 600`, owned by `portal`; existing secrets are kept on re-runs
+- if there is **no** existing `/etc/caddy/Caddyfile`: installs Caddy if missing and writes a Caddyfile proxying the domain to `localhost:8080`
+- if a Caddyfile **already exists** (the server hosts other sites): leaves it untouched and writes the portal site block to `/etc/caddy/portal.caddy-snippet` — add `import /etc/caddy/portal.caddy-snippet` to your Caddyfile (or paste the block into your own Caddy config) and reload Caddy
 - prints the teacher token once — save it for the laptop config below
 
 Then install the systemd service:
@@ -98,7 +100,6 @@ ssh user@server "sudo systemctl enable --now portal"
 Notes:
 
 - `PORTAL_JWT_SECRET` / `PORTAL_TEACHER_TOKEN` (inline values) are accepted instead of the `*_FILE` variants. A JWT secret is **required** — the server refuses to start without one.
-- `PORTAL_COOKIE_DOMAIN` is unset by default; set it to `cs.lairdmath.com` if cookies misbehave on the subdomain.
 - Without a teacher token the server runs, but all `/api/admin/*` endpoints return 503.
 - If many students share one school IP, raise `PORTAL_RATE_LIMIT` (e.g. `600`).
 
@@ -108,7 +109,7 @@ Add to `~/.grades/config.yaml`:
 
 ```yaml
 portal:
-  url: https://cs.lairdmath.com
+  url: https://grades.mrpopovici.com
   teacher_token: <token printed by server-setup.sh>
   server: user@your-server        # optional, for backups
   key: ~/.ssh/id_ed25519          # optional, SSH key for backups
@@ -143,7 +144,7 @@ Accounts are included in the next publish.
 
 ### Admin UI
 
-Open `https://cs.lairdmath.com/admin` and log in with the teacher token. The dashboard lists published courses; each course shows its students, and you can reset a student's password or unpublish a course from there.
+Open `https://grades.mrpopovici.com/admin` and log in with the teacher token. The dashboard lists published courses; each course shows its students, and you can reset a student's password or unpublish a course from there.
 
 ## Backups
 
@@ -195,7 +196,7 @@ ssh user@server "sudo systemctl restart portal"    # restart
 - Find the old process: `sudo lsof -i :8080`, or change `PORTAL_ADDR` in the service.
 
 **Domain not resolving:**
-- DNS can take 5–30 minutes to propagate. Check with: `dig cs.lairdmath.com A +short`
+- DNS can take 5–30 minutes to propagate. Check with: `dig grades.mrpopovici.com A +short`
 
 **Students can't log in after publishing:**
 - Accounts are created with `grades web accounts init` on the laptop and pushed with the next publish. Verify with `grades web accounts list`.
