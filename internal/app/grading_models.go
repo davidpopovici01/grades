@@ -104,7 +104,8 @@ func (a *App) categoryRulesForContext(courseYearID, termID int) ([]CategoryRule,
 		       category_scheme_weights.weight_percent IS NOT NULL,
 		       COALESCE(category_grading_policies.scheme_key, 'average'),
 		       category_grading_policies.default_pass_percent,
-		       category_grading_policies.show_in_overview
+		       category_grading_policies.show_in_overview,
+		       COALESCE(category_grading_policies.drop_lowest, 0)
 		FROM categories
 		LEFT JOIN category_scheme_weights
 		  ON category_scheme_weights.category_id = categories.category_id
@@ -150,7 +151,7 @@ func (a *App) categoryRulesForContext(courseYearID, termID int) ([]CategoryRule,
 	var rules []CategoryRule
 	for rows.Next() {
 		var rule CategoryRule
-		if err := rows.Scan(&rule.CategoryID, &rule.CategoryName, &rule.WeightPercent, &rule.HasWeight, &rule.SchemeKey, &rule.DefaultPassPercent, &rule.ShowInOverview); err != nil {
+		if err := rows.Scan(&rule.CategoryID, &rule.CategoryName, &rule.WeightPercent, &rule.HasWeight, &rule.SchemeKey, &rule.DefaultPassPercent, &rule.ShowInOverview, &rule.DropLowest); err != nil {
 			return nil, err
 		}
 		rules = append(rules, rule)
@@ -666,60 +667,94 @@ func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) 
 	return values, weighted, nil
 }
 
+// dropCandidate is one counted assignment considered for a drop-lowest rule.
+type dropCandidate struct {
+	id        int
+	maxPoints int
+	percent   float64
+}
+
+// dropLowestIDs returns the set of assignment IDs to drop: the n lowest by
+// effective percent. Ties drop the higher-point assignment first, then the
+// lower assignment ID, keeping the choice deterministic. At least one
+// candidate is always kept so a category can never be emptied by dropping.
+func dropLowestIDs(candidates []dropCandidate, n int) map[int]bool {
+	if n <= 0 || len(candidates) <= 1 {
+		return nil
+	}
+	sorted := make([]dropCandidate, len(candidates))
+	copy(sorted, candidates)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].percent != sorted[j].percent {
+			return sorted[i].percent < sorted[j].percent
+		}
+		if sorted[i].maxPoints != sorted[j].maxPoints {
+			return sorted[i].maxPoints > sorted[j].maxPoints
+		}
+		return sorted[i].id < sorted[j].id
+	})
+	dropCount := n
+	if dropCount > len(sorted)-1 {
+		dropCount = len(sorted) - 1
+	}
+	dropped := make(map[int]bool, dropCount)
+	for _, candidate := range sorted[:dropCount] {
+		dropped[candidate.id] = true
+	}
+	return dropped
+}
+
 func calculateCategoryScore(rule CategoryRule, assignments []AssignmentScoreMeta, grades map[int]GradeRecord) (float64, bool) {
 	if len(assignments) == 0 {
 		return 0, false
 	}
-	switch rule.SchemeKey {
-	case "completion":
-		total := 0.0
-		count := 0
-		for _, assignment := range assignments {
-			record := grades[assignment.ID]
-			record.MaxPoints = assignment.MaxPoints
-			if !countsTowardAssignmentAverage(record) {
-				continue
-			}
-			total += completionPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift)
-			count++
+	candidates := make([]dropCandidate, 0, len(assignments))
+	for _, assignment := range assignments {
+		record := grades[assignment.ID]
+		record.MaxPoints = assignment.MaxPoints
+		if !countsTowardAssignmentAverage(record) {
+			continue
 		}
-		if count == 0 {
-			return 0, false
+		var percent float64
+		if rule.SchemeKey == "completion" {
+			percent = completionPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift)
+		} else {
+			percent = effectiveAssignmentPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift)
 		}
-		return total / float64(count), true
-	case "total-points":
+		candidates = append(candidates, dropCandidate{id: assignment.ID, maxPoints: assignment.MaxPoints, percent: percent})
+	}
+	if len(candidates) == 0 {
+		return 0, false
+	}
+	dropped := dropLowestIDs(candidates, rule.DropLowest)
+	if rule.SchemeKey == "total-points" {
 		sum := 0.0
 		maxTotal := 0.0
-		for _, assignment := range assignments {
-			record := grades[assignment.ID]
-			record.MaxPoints = assignment.MaxPoints
-			if !countsTowardAssignmentAverage(record) {
+		for _, candidate := range candidates {
+			if dropped[candidate.id] {
 				continue
 			}
-			maxTotal += float64(assignment.MaxPoints)
-			sum += (effectiveAssignmentPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift) / 100) * float64(assignment.MaxPoints)
+			maxTotal += float64(candidate.maxPoints)
+			sum += (candidate.percent / 100) * float64(candidate.maxPoints)
 		}
 		if maxTotal == 0 {
 			return 0, false
 		}
 		return (sum / maxTotal) * 100, true
-	default:
-		total := 0.0
-		count := 0
-		for _, assignment := range assignments {
-			record := grades[assignment.ID]
-			record.MaxPoints = assignment.MaxPoints
-			if !countsTowardAssignmentAverage(record) {
-				continue
-			}
-			total += effectiveAssignmentPercent(record, assignment.PassPercent, assignment.Anchor, assignment.Lift)
-			count++
-		}
-		if count == 0 {
-			return 0, false
-		}
-		return total / float64(count), true
 	}
+	total := 0.0
+	count := 0
+	for _, candidate := range candidates {
+		if dropped[candidate.id] {
+			continue
+		}
+		total += candidate.percent
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return total / float64(count), true
 }
 
 func (a *App) assignmentGradesForPopulation() ([]GradeRecord, error) {

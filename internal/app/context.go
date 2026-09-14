@@ -58,14 +58,45 @@ func (a *App) UseYear(value string) error {
 	if err != nil {
 		return err
 	}
+
+	// Remember the current course and section so they can be kept when they
+	// also exist in the new year.
+	prev := a.context()
+	prevCourseBase, prevSection := "", ""
+	if prev.CourseYearID != 0 {
+		var name string
+		if err := a.db.QueryRow(`SELECT name FROM course_years WHERE course_year_id = ?`, prev.CourseYearID).Scan(&name); err == nil {
+			prevCourseBase = baseCourseName(name)
+		}
+	}
+	if prev.SectionID != 0 {
+		_ = a.db.QueryRow(`SELECT name FROM sections WHERE section_id = ?`, prev.SectionID).Scan(&prevSection)
+	}
+
 	a.setContext("context.year", selected)
 	a.setContext("context.course_year_id", 0)
 	a.setContext("context.section_id", 0)
 	a.setContext("context.assignment_id", 0)
+
+	kept := ""
+	if prevCourseBase != "" && prevCourseBase != selected {
+		if id, display, err := a.lookupCourseYear(prevCourseBase, selected); err == nil {
+			a.setContext("context.course_year_id", id)
+			kept = fmt.Sprintf(" (kept course: %s", baseCourseName(display))
+			if prevSection != "" {
+				if sid, sdisplay, err := a.lookupSection(prevSection, id); err == nil {
+					a.setContext("context.section_id", sid)
+					kept += fmt.Sprintf(", section: %s", sdisplay)
+				}
+			}
+			kept += ")"
+		}
+	}
+
 	if err := a.writeContextConfig(); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(a.out, "Using year: %s\n", selected)
+	_, _ = fmt.Fprintf(a.out, "Using year: %s%s\n", selected, kept)
 	return nil
 }
 

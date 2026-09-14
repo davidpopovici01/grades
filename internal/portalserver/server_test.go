@@ -315,7 +315,7 @@ func TestPublishCourseRollback(t *testing.T) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Seed an account that will collide on the UNIQUE username constraint.
+	// Seed an account that must survive the rolled-back publish untouched.
 	seed := &PublishRequest{
 		Accounts: []portalauth.Account{
 			{StudentID: 1, Username: "taken", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: now},
@@ -326,12 +326,12 @@ func TestPublishCourseRollback(t *testing.T) {
 		t.Fatalf("seed publish: %v", err)
 	}
 
-	// The second account fails on the username collision after the first
+	// The second account fails on an invalid timestamp after the first
 	// account was already written; the transaction must roll back everything.
 	bad := &PublishRequest{
 		Accounts: []portalauth.Account{
 			{StudentID: 2, Username: "fresh", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: now},
-			{StudentID: 3, Username: "taken", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: now},
+			{StudentID: 3, Username: "other", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: "not-a-time"},
 		},
 		Course: CourseInfo{CourseYearID: 2, TermID: 1, CourseName: "Rolled Back", TermName: "T1", PublishedAt: now},
 		Students: []struct {
@@ -342,7 +342,7 @@ func TestPublishCourseRollback(t *testing.T) {
 		},
 	}
 	if err := store.PublishCourse(bad); err == nil {
-		t.Fatal("expected publish to fail on duplicate username")
+		t.Fatal("expected publish to fail on invalid password_changed_at")
 	}
 
 	if acc, err := store.GetAccountByStudentID(2); err != nil || acc != nil {
@@ -362,6 +362,196 @@ func TestPublishCourseRollback(t *testing.T) {
 	// The seed data must be untouched.
 	if acc, err := store.GetAccountByStudentID(1); err != nil || acc == nil {
 		t.Errorf("seed account missing after rollback (acc=%+v, err=%v)", acc, err)
+	}
+}
+
+func TestPublishCourseMigratesRenumberedAccount(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "portal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	newer := time.Now().UTC().Format(time.RFC3339)
+
+	// Seed: alice.brown lives under student_pk 1 with a VPS-changed (newer)
+	// password, as left behind before local student IDs were renumbered.
+	seed := &PublishRequest{
+		Accounts: []portalauth.Account{
+			{StudentID: 1, Username: "alice.brown", PasswordSalt: "vps-salt", PasswordHash: "vps-hash", PasswordChangedAt: newer},
+			{StudentID: 2, Username: "bob.zhang", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: old},
+		},
+		Course: CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: newer},
+	}
+	if err := store.PublishCourse(seed); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+
+	// After renumbering, alice.brown arrives under student_pk 5 with an
+	// older password. The publish must succeed, move her account to the new
+	// ID, and keep the newer VPS-side password.
+	renumbered := &PublishRequest{
+		Accounts: []portalauth.Account{
+			{StudentID: 5, Username: "alice.brown", PasswordSalt: "local-salt", PasswordHash: "local-hash", PasswordChangedAt: old},
+			{StudentID: 6, Username: "bob.zhang", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: old},
+		},
+		Course: CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: newer},
+	}
+	if err := store.PublishCourse(renumbered); err != nil {
+		t.Fatalf("renumbered publish: %v", err)
+	}
+
+	acc, err := store.GetAccountByStudentID(5)
+	if err != nil || acc == nil {
+		t.Fatalf("alice.brown must exist under student_pk 5 (acc=%+v, err=%v)", acc, err)
+	}
+	if acc.PasswordHash != "vps-hash" {
+		t.Errorf("expected newer VPS-side password to be kept, got hash %q", acc.PasswordHash)
+	}
+	if acc, err := store.GetAccountByStudentID(1); err != nil || acc != nil {
+		t.Errorf("stale account under student_pk 1 must be removed (acc=%+v, err=%v)", acc, err)
+	}
+	if acc, err := store.GetAccountByStudentID(6); err != nil || acc == nil {
+		t.Errorf("bob.zhang must exist under student_pk 6 (acc=%+v, err=%v)", acc, err)
+	}
+	if acc, err := store.GetAccountByStudentID(2); err != nil || acc != nil {
+		t.Errorf("stale account under student_pk 2 must be removed (acc=%+v, err=%v)", acc, err)
+	}
+}
+
+func TestPublishCourseRemovesStaleSnapshots(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "portal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	type studentSnapshot = struct {
+		StudentID int             `json:"studentId"`
+		Snapshot  json.RawMessage `json:"snapshot"`
+	}
+
+	seed := &PublishRequest{
+		Course: CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: now},
+		Students: []studentSnapshot{
+			{StudentID: 1, Snapshot: json.RawMessage(`{"firstName":"Alice"}`)},
+			{StudentID: 2, Snapshot: json.RawMessage(`{"firstName":"Bob"}`)},
+		},
+	}
+	if err := store.PublishCourse(seed); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+
+	// After local IDs were renumbered, the roster arrives under new IDs.
+	renumbered := &PublishRequest{
+		Course: CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: now},
+		Students: []studentSnapshot{
+			{StudentID: 5, Snapshot: json.RawMessage(`{"firstName":"Alice"}`)},
+			{StudentID: 6, Snapshot: json.RawMessage(`{"firstName":"Bob"}`)},
+		},
+	}
+	if err := store.PublishCourse(renumbered); err != nil {
+		t.Fatalf("renumbered publish: %v", err)
+	}
+
+	students, err := store.ListStudentsForCourse(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(students) != 2 {
+		t.Fatalf("expected 2 students after renumbered publish, got %d", len(students))
+	}
+	for _, st := range students {
+		if st.StudentID != 5 && st.StudentID != 6 {
+			t.Errorf("stale snapshot for student_pk %d survived publish", st.StudentID)
+		}
+	}
+}
+
+func TestPublishCourseRemapsStudentIDsByUsername(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "portal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	newer := time.Now().UTC().Format(time.RFC3339)
+
+	// Seed the server as it looked before local IDs were renumbered:
+	// alice.brown under pk 1 (with a VPS-changed password), bob.zhang under
+	// pk 2, and carol.chen under pk 9, whose account no longer exists locally.
+	seed := &PublishRequest{
+		Accounts: []portalauth.Account{
+			{StudentID: 1, Username: "alice.brown", PasswordSalt: "vps-salt", PasswordHash: "vps-hash", PasswordChangedAt: newer},
+			{StudentID: 2, Username: "bob.zhang", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: old},
+			{StudentID: 9, Username: "carol.chen", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: old},
+		},
+		Course: CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: newer},
+	}
+	if err := store.PublishCourse(seed); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+
+	// Student-keyed server data from before the renumbering.
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := store.db.Exec(query, args...); err != nil {
+			t.Fatalf("exec %q: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO sub_assignments(id, course_year_id, term_id, title, language) VALUES (1, 1, 1, 'HW1', 'python')`)
+	exec(`INSERT INTO sub_submissions(id, assignment_id, student_pk, attempt, submitted_at) VALUES (1, 1, 1, 1, ?), (2, 1, 2, 1, ?)`, old, old)
+
+	// Publish after renumbering: alice is now pk 5, bob pk 6, carol is gone.
+	renumbered := &PublishRequest{
+		Accounts: []portalauth.Account{
+			{StudentID: 5, Username: "alice.brown", PasswordSalt: "local-salt", PasswordHash: "local-hash", PasswordChangedAt: old},
+			{StudentID: 6, Username: "bob.zhang", PasswordSalt: "s", PasswordHash: "h", PasswordChangedAt: old},
+		},
+		IDMap: []PortalIDMapping{
+			{StudentID: 5, Username: "alice.brown"},
+			{StudentID: 6, Username: "bob.zhang"},
+		},
+		Course: CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: newer},
+	}
+	if err := store.PublishCourse(renumbered); err != nil {
+		t.Fatalf("renumbered publish: %v", err)
+	}
+
+	acc, err := store.GetAccountByStudentID(5)
+	if err != nil || acc == nil {
+		t.Fatalf("alice.brown must exist under pk 5 (acc=%+v, err=%v)", acc, err)
+	}
+	if acc.PasswordHash != "vps-hash" {
+		t.Errorf("expected newer VPS-side password to be kept, got %q", acc.PasswordHash)
+	}
+	if acc, err := store.GetAccountByStudentID(6); err != nil || acc == nil {
+		t.Errorf("bob.zhang must exist under pk 6 (acc=%+v, err=%v)", acc, err)
+	}
+	for _, staleID := range []int{1, 2, 9} {
+		if acc, err := store.GetAccountByStudentID(staleID); err != nil || acc != nil {
+			t.Errorf("account under old pk %d must be gone (acc=%+v, err=%v)", staleID, acc, err)
+		}
+	}
+
+	var submissionOwners []int
+	rows, err := store.db.Query(`SELECT student_pk FROM sub_submissions ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		submissionOwners = append(submissionOwners, id)
+	}
+	if len(submissionOwners) != 2 || submissionOwners[0] != 5 || submissionOwners[1] != 6 {
+		t.Errorf("expected submissions re-keyed to 5 and 6, got %v", submissionOwners)
 	}
 }
 

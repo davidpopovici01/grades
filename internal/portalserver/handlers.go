@@ -2,7 +2,9 @@ package portalserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +39,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !portalauth.VerifyPassword(req.Password, acc.PasswordSalt, acc.PasswordHash) {
+		s.logActivity(0, req.Username, activityLoginFailed, "")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
@@ -47,7 +50,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Expire any legacy host-only cookie so it cannot shadow the new
+	// domain-wide cookie while old sessions roll over.
+	if s.config.CookieDomain != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookieName,
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   s.config.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+		})
+	}
 	s.setTokenCookie(w, token)
+	s.logActivity(acc.StudentID, acc.Username, activityLogin, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                 true,
 		"studentId":          acc.StudentID,
@@ -166,6 +183,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.logActivity(acc.StudentID, acc.Username, activityPasswordChange, "")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -232,6 +250,63 @@ func (s *Server) handleAdminListCourses(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"courses": courses})
 }
 
+// snapshotAssignment mirrors the per-assignment fields of the published
+// student snapshot that the admin grades overview needs.
+type snapshotAssignment struct {
+	AssignmentID int      `json:"assignmentId"`
+	Title        string   `json:"title"`
+	CategoryID   int      `json:"categoryId"`
+	CategoryName string   `json:"categoryName"`
+	MaxPoints    int      `json:"maxPoints"`
+	PassPercent  *float64 `json:"passPercent"`
+	Score        *float64 `json:"score"`
+	Flags        []string `json:"flags"`
+}
+
+// snapshotGrades mirrors the student-level fields of the published snapshot.
+type snapshotGrades struct {
+	FirstName     string               `json:"firstName"`
+	LastName      string               `json:"lastName"`
+	ChineseName   string               `json:"chineseName"`
+	WeightedTotal float64              `json:"weightedTotal"`
+	LetterGrade   string               `json:"letterGrade"`
+	Assignments   []snapshotAssignment `json:"assignments"`
+}
+
+// pendingAction mirrors the CLI gradebook rules: a missing flag always means
+// missing (the CLI stores it as score 0 + flag), and redo is pending when the
+// score is missing or below the pass rate — including an unflagged failing
+// score (hasPendingRedo in grades.go).
+func pendingAction(a snapshotAssignment) (missing, redo bool) {
+	cheat, passFlag, hasRedo := false, false, false
+	for _, f := range a.Flags {
+		switch f {
+		case "missing":
+			missing = true
+		case "cheat":
+			cheat = true
+		case "pass":
+			passFlag = true
+		case "redo":
+			hasRedo = true
+		}
+	}
+	if missing {
+		return true, false
+	}
+	if cheat || passFlag {
+		return false, false
+	}
+	if a.PassPercent == nil || *a.PassPercent <= 0 || a.MaxPoints <= 0 {
+		return false, false
+	}
+	passing := a.Score != nil && (*a.Score/float64(a.MaxPoints))*100 >= *a.PassPercent
+	if hasRedo {
+		return false, !passing
+	}
+	return false, a.Score != nil && !passing
+}
+
 // handleAdminCourseRoutes handles /api/admin/courses/{courseYearId}/{termId}/students and DELETE.
 func (s *Server) handleAdminCourseRoutes(w http.ResponseWriter, r *http.Request) {
 	// Path format: /api/admin/courses/{courseYearId}/{termId}[/students]
@@ -271,15 +346,78 @@ func (s *Server) handleAdminCourseRoutes(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "course not found"})
 			return
 		}
-		students, err := s.store.ListStudentsForCourse(courseYearID, termID)
+		rows, err := s.store.ListSnapshotRowsForCourse(courseYearID, termID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list students"})
 			return
 		}
+
+		students := []map[string]any{}
+		columns := []map[string]any{}
+		seenColumns := map[int]bool{}
+		for _, row := range rows {
+			var snap snapshotGrades
+			if err := json.Unmarshal(row.Raw, &snap); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to parse snapshot"})
+				return
+			}
+			grades := map[string]any{}
+			missing, redo := 0, 0
+			for _, a := range snap.Assignments {
+				if !seenColumns[a.AssignmentID] {
+					seenColumns[a.AssignmentID] = true
+					columns = append(columns, map[string]any{
+						"id": a.AssignmentID, "title": a.Title, "maxPoints": a.MaxPoints, "categoryName": a.CategoryName,
+					})
+				}
+				label := ""
+				if a.Score != nil {
+					label = fmt.Sprintf("%s/%d", strconv.FormatFloat(*a.Score, 'f', -1, 64), a.MaxPoints)
+				}
+				flags := a.Flags
+				if flags == nil {
+					flags = []string{}
+				}
+				pendingMissing, pendingRedo := pendingAction(a)
+				if pendingMissing {
+					missing++
+				}
+				if pendingRedo {
+					redo++
+				}
+				// Show chips for pending actions even when the flag itself is
+				// absent (an unflagged failing score still needs a redo).
+				display := append([]string{}, flags...)
+				if pendingRedo && !slices.Contains(display, "redo") {
+					display = append(display, "redo")
+				}
+				grades[strconv.Itoa(a.AssignmentID)] = map[string]any{
+					"score":   a.Score,
+					"flags":   display,
+					"pending": map[string]bool{"missing": pendingMissing, "redo": pendingRedo},
+					"label":   label,
+				}
+			}
+			students = append(students, map[string]any{
+				"studentId":     row.StudentID,
+				"username":      row.Username,
+				"firstName":     snap.FirstName,
+				"lastName":      snap.LastName,
+				"chineseName":   snap.ChineseName,
+				"weightedTotal": snap.WeightedTotal,
+				"letterGrade":   snap.LetterGrade,
+				"missing":       missing,
+				"redo":          redo,
+				"grades":        grades,
+			})
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"courseName": course.CourseName,
-			"termName":   course.TermName,
-			"students":   students,
+			"courseName":     course.CourseName,
+			"courseYearName": course.CourseYearName,
+			"termName":       course.TermName,
+			"publishedAt":    course.PublishedAt,
+			"assignments":    columns,
+			"students":       students,
 		})
 		return
 	}

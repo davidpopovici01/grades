@@ -10,11 +10,19 @@ import { ChangePassword } from './components/ChangePassword';
 import { AdminLogin } from './components/AdminLogin';
 import { AdminDashboard } from './components/AdminDashboard';
 import { AdminCourseView } from './components/AdminCourseView';
+import { AdminMaterials } from './components/AdminMaterials';
+import { AdminSubmissions } from './components/AdminSubmissions';
+import { AdminAssignmentDetail } from './components/AdminAssignmentDetail';
+import { AdminActivity } from './components/AdminActivity';
+import { Materials } from './components/Materials';
+import { Submissions } from './components/Submissions';
 
 function App() {
   const { user, loading, error, login, logout, checkAuth } = useAuth();
   const [gradesData, setGradesData] = useState(null);
   const [selectedCourseIdx, setSelectedCourseIdx] = useState(0);
+  // The same SPA serves both subdomains; on the materials host, land on /materials.
+  const isMaterialsHost = window.location.hostname.startsWith('materials.');
 
   useEffect(() => {
     if (!user) {
@@ -45,6 +53,10 @@ function App() {
         <Route path="/admin/login" element={<AdminLogin />} />
         <Route path="/admin" element={<AdminDashboard />} />
         <Route path="/admin/courses/:courseYearId/:termId" element={<AdminCourseView />} />
+        <Route path="/admin/materials" element={<AdminMaterials />} />
+        <Route path="/admin/submissions" element={<AdminSubmissions />} />
+        <Route path="/admin/submissions/:id" element={<AdminAssignmentDetail />} />
+        <Route path="/admin/activity" element={<AdminActivity />} />
 
         {/* Student routes */}
         <Route
@@ -67,13 +79,19 @@ function App() {
                   <Route
                     path="/"
                     element={
-                      <StudentHome
-                        gradesData={gradesData}
-                        selectedCourseIdx={selectedCourseIdx}
-                        onSelectCourse={setSelectedCourseIdx}
-                      />
+                      isMaterialsHost ? (
+                        <Navigate to="/materials" replace />
+                      ) : (
+                        <StudentHome
+                          gradesData={gradesData}
+                          selectedCourseIdx={selectedCourseIdx}
+                          onSelectCourse={setSelectedCourseIdx}
+                        />
+                      )
                     }
                   />
+                  <Route path="/materials" element={<Materials />} />
+                  <Route path="/submissions" element={<Submissions />} />
                   <Route
                     path="/what-if"
                     element={

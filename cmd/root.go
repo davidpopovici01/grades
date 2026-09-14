@@ -377,6 +377,17 @@ func newStudentsCmd(a *app.App) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
+		Use:   "edit [student|id]",
+		Args:  cobra.ArbitraryArgs,
+		Short: "Edit a student's name, student ID, or PowerSchool number",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 && strings.EqualFold(args[0], "id") {
+				return a.EditStudentIDInteractive()
+			}
+			return a.EditStudentInteractive(strings.Join(args, " "))
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
 		Use:   "import-powerschool <file>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Update PowerSchool student numbers from a PowerSchool export CSV",
@@ -398,6 +409,14 @@ func newStudentsCmd(a *app.App) *cobra.Command {
 		Short: "Set a student active again",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.SetStudentStatus(strings.Join(args, " "), "active")
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "sort",
+		Args:  cobra.NoArgs,
+		Short: "Renumber students alphabetically by last name so lists are sorted",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.SortStudents()
 		},
 	})
 
@@ -487,6 +506,14 @@ func newCategoriesCmd(a *app.App) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
+		Use:   "drop-lowest <category> <n>",
+		Args:  cobra.ExactArgs(2),
+		Short: "Drop the N lowest assignment scores in a category (0 to disable)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.SetCategoryDropLowest(args[0], args[1])
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
 		Use:   "import [file]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Import category weights, schemes, and pass rates from CSV",
@@ -495,6 +522,18 @@ func newCategoriesCmd(a *app.App) *cobra.Command {
 				return a.ImportCategoriesWithGuidance(args[0])
 			}
 			return a.RunCategoryImportWizard()
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "copy-year [course-year]",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Copy the category setup (schemes, pass rates, weights) from another course-year — by default the most recent other year of this course",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := ""
+			if len(args) == 1 {
+				name = args[0]
+			}
+			return a.CopyCategoriesFromYear(name)
 		},
 	})
 	cmd.AddCommand(&cobra.Command{

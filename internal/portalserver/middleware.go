@@ -54,13 +54,21 @@ func isDevOrigin(origin string) bool {
 }
 
 // loggingMiddleware logs each request with method, path, status, and duration.
-func loggingMiddleware(next http.Handler) http.Handler {
+// When the request carries a valid session cookie, the student's username is
+// included so the journal shows who acted, not just what happened.
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(wrapped, r)
 		duration := time.Since(start)
-		fmt.Printf("[%s] %s %s %d %s\n", start.Format(time.RFC3339), r.Method, r.URL.Path, wrapped.statusCode, duration)
+		identity := ""
+		if cookie, err := r.Cookie(cookieName); err == nil {
+			if claims, err := s.jwt.Verify(cookie.Value); err == nil {
+				identity = " user=" + claims.Username
+			}
+		}
+		fmt.Printf("[%s] %s %s %d %s%s\n", start.Format(time.RFC3339), r.Method, r.URL.Path, wrapped.statusCode, duration, identity)
 	})
 }
 

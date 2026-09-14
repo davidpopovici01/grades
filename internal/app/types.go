@@ -73,6 +73,7 @@ type CategoryRule struct {
 	SchemeKey          string
 	DefaultPassPercent sql.NullFloat64
 	ShowInOverview     sql.NullBool
+	DropLowest         int
 }
 
 type GradingSchemeDefinition struct {

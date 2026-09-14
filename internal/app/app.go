@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/davidpopovici01/grades/internal/db"
 	"github.com/davidpopovici01/grades/internal/migrate"
@@ -353,6 +354,15 @@ func fallback(s string) string {
 
 func normalizeSpaces(s string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+}
+
+func capitalizeName(s string) string {
+	if s == "" {
+		return s
+	}
+	runes := []rune(s)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }
 
 func (a *App) promptOptional(label string) (string, error) {

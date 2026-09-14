@@ -953,6 +953,9 @@ func (a *App) promptSectionForNewStudent(courseYearID int) (int, error) {
 }
 
 func (a *App) createStudentWithPowerSchoolNumber(first, last, chineseName, psNum string) (Student, error) {
+	first = capitalizeName(normalizeSpaces(first))
+	last = capitalizeName(normalizeSpaces(last))
+	chineseName = capitalizeName(normalizeSpaces(chineseName))
 	res, err := a.db.Exec(`INSERT INTO students(first_name, last_name, chinese_name, powerschool_num, status) VALUES (?, ?, ?, ?, 'active')`, first, last, chineseName, psNum)
 	if err != nil {
 		return Student{}, err

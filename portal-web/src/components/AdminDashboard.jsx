@@ -51,7 +51,18 @@ export function AdminDashboard() {
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <span className="font-semibold text-gray-800">Grades Admin</span>
+          <div className="flex items-center gap-6">
+            <span className="font-semibold text-gray-800">Grades Admin</span>
+            <Link to="/admin/materials" className="text-sm text-gray-600 hover:text-gray-900">
+              Materials
+            </Link>
+            <Link to="/admin/submissions" className="text-sm text-gray-600 hover:text-gray-900">
+              Submissions
+            </Link>
+            <Link to="/admin/activity" className="text-sm text-gray-600 hover:text-gray-900">
+              Activity
+            </Link>
+          </div>
           <button
             onClick={() => {
               sessionStorage.removeItem('adminToken');
@@ -83,7 +94,9 @@ export function AdminDashboard() {
                       <div className="font-medium text-gray-900">
                         {course.courseName}
                       </div>
-                      <div className="text-sm text-gray-500">{course.termName}</div>
+                      <div className="text-sm text-gray-500">
+                        {course.courseYearName ? `${course.courseYearName} · ` : ''}{course.termName}
+                      </div>
                     </div>
                     <div className="text-sm text-gray-400">
                       Published {new Date(course.publishedAt).toLocaleString()}

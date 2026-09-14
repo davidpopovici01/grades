@@ -43,6 +43,12 @@ var categoryOverviewVisibilitySQL string
 //go:embed sql/013_assignment_export_rows.sql
 var assignmentExportRowsSQL string
 
+//go:embed sql/014_capitalize_student_names.sql
+var capitalizeStudentNamesSQL string
+
+//go:embed sql/015_drop_lowest.sql
+var dropLowestSQL string
+
 type migration struct {
 	version string
 	sql     string
@@ -61,6 +67,8 @@ var migrations = []migration{
 	{version: "010_overview_cutoff", sql: overviewCutoffSQL},
 	{version: "012_category_overview_visibility", sql: categoryOverviewVisibilitySQL},
 	{version: "013_assignment_export_rows", sql: assignmentExportRowsSQL},
+	{version: "014_capitalize_student_names", sql: capitalizeStudentNamesSQL},
+	{version: "015_drop_lowest", sql: dropLowestSQL},
 }
 
 func Up(db *sql.DB) error {

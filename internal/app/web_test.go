@@ -532,6 +532,169 @@ func TestPortalImprovementTipsRespectShowInOverview(t *testing.T) {
 	}
 }
 
+func TestPortalSnapshotDropLowest(t *testing.T) {
+	portalApp, home := newPortalTestApp(t)
+	defer portalApp.Close()
+	conn, err := db.Open(filepath.Join(home, "grades.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := migrate.Up(conn); err != nil {
+		conn.Close()
+		t.Fatalf("migrate: %v", err)
+	}
+	statements := []string{
+		`INSERT INTO terms(term_id, name, start_date, end_date) VALUES (1, 'Fall 2026', '2026-08-15', '2026-12-20')`,
+		`INSERT INTO courses(course_id, name) VALUES (1, 'APCSA')`,
+		`INSERT INTO course_years(course_year_id, course_id, name) VALUES (1, 1, 'APCSA 2026-27')`,
+		`INSERT INTO course_year_terms(course_year_id, term_id) VALUES (1, 1)`,
+		`INSERT INTO sections(section_id, course_year_id, name) VALUES (1, 1, '12A')`,
+		`INSERT INTO categories(category_id, name) VALUES (1, 'Quiz')`,
+		`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (1, 'Alice', 'Brown', '3001')`,
+		`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 1, 1, '2026-08-15', 'active')`,
+		`INSERT INTO category_schemes(scheme_id, name) VALUES (1, 'Default')`,
+		`INSERT INTO category_scheme_weights(scheme_id, category_id, weight_percent) VALUES (1, 1, 100)`,
+		`UPDATE course_year_terms SET scheme_id = 1 WHERE course_year_id = 1 AND term_id = 1`,
+		`INSERT INTO category_grading_policies(course_year_id, term_id, category_id, scheme_key, default_pass_percent, drop_lowest) VALUES (1, 1, 1, 'average', 0, 1)`,
+		`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points) VALUES (1, 1, 1, 1, 'Quiz 1', 100), (2, 1, 1, 1, 'Quiz 2', 100), (3, 1, 1, 1, 'Quiz 3', 100)`,
+		`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count) VALUES (1, 1, 100, 0, 0), (2, 1, 80, 0, 0), (3, 1, 0, 2, 0)`,
+	}
+	for _, stmt := range statements {
+		if _, err := conn.Exec(stmt); err != nil {
+			conn.Close()
+			t.Fatalf("seed stmt failed: %v", err)
+		}
+	}
+	conn.Close()
+
+	portalApp.v.Set("context.year", "2026-27")
+	portalApp.v.Set("context.term_id", 1)
+	portalApp.v.Set("context.course_year_id", 1)
+	if err := portalApp.v.WriteConfig(); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	snapshot, err := portalApp.buildPortalCourseSnapshot(1, 1)
+	if err != nil {
+		t.Fatalf("build portal course snapshot: %v", err)
+	}
+	if len(snapshot.Students) != 1 {
+		t.Fatalf("expected 1 student snapshot, got %d", len(snapshot.Students))
+	}
+	grades := snapshot.Students[0]
+
+	if len(grades.Categories) != 1 {
+		t.Fatalf("expected 1 category, got %d", len(grades.Categories))
+	}
+	cat := grades.Categories[0]
+	if cat.DropLowest != 1 {
+		t.Fatalf("expected category dropLowest 1, got %d", cat.DropLowest)
+	}
+	if !cat.Included || cat.Score != 90 {
+		t.Fatalf("expected dropped category score 90, got included=%v score=%v", cat.Included, cat.Score)
+	}
+	if grades.WeightedTotal != 90 {
+		t.Fatalf("expected weighted total 90, got %v", grades.WeightedTotal)
+	}
+
+	droppedTitles := map[string]bool{}
+	for _, a := range grades.Assignments {
+		droppedTitles[a.Title] = a.Dropped
+	}
+	if droppedTitles["Quiz 1"] || droppedTitles["Quiz 2"] || !droppedTitles["Quiz 3"] {
+		t.Fatalf("expected only the missing Quiz 3 to be dropped, got %v", droppedTitles)
+	}
+}
+
+// TestPortalImprovementTipsFollowOverviewLogic verifies the portal tips match
+// the CLI grades overview logic: a redo flag with a passing score is done,
+// a below-pass score needs a redo even without the flag, late work without a
+// score is called out, and cheat/pass records are excluded.
+func TestPortalImprovementTipsFollowOverviewLogic(t *testing.T) {
+	portalApp, home := newPortalTestApp(t)
+	defer portalApp.Close()
+	conn, err := db.Open(filepath.Join(home, "grades.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := migrate.Up(conn); err != nil {
+		conn.Close()
+		t.Fatalf("migrate: %v", err)
+	}
+	statements := []string{
+		`INSERT INTO terms(term_id, name, start_date, end_date) VALUES (1, 'Fall 2026', '2026-08-15', '2026-12-20')`,
+		`INSERT INTO courses(course_id, name) VALUES (1, 'APCSA')`,
+		`INSERT INTO course_years(course_year_id, course_id, name) VALUES (1, 1, 'APCSA 2026-27')`,
+		`INSERT INTO course_year_terms(course_year_id, term_id) VALUES (1, 1)`,
+		`INSERT INTO sections(section_id, course_year_id, name) VALUES (1, 1, '12A')`,
+		`INSERT INTO categories(category_id, name) VALUES (1, 'Homework')`,
+		`INSERT INTO students(student_pk, first_name, last_name, school_student_id) VALUES (1, 'Alice', 'Brown', '3001')`,
+		`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES (1, 1, 1, '2026-08-15', 'active')`,
+		`INSERT INTO category_schemes(scheme_id, name) VALUES (1, 'Default')`,
+		`INSERT INTO category_scheme_weights(scheme_id, category_id, weight_percent) VALUES (1, 1, 100)`,
+		`UPDATE course_year_terms SET scheme_id = 1 WHERE course_year_id = 1 AND term_id = 1`,
+		`INSERT INTO category_grading_policies(course_year_id, term_id, category_id, scheme_key, default_pass_percent) VALUES (1, 1, 1, 'completion', 80)`,
+		`INSERT INTO assignments(assignment_id, course_year_id, term_id, category_id, title, max_points, pass_percent) VALUES
+			(1, 1, 1, 1, 'RedoDone', 10, 80),
+			(2, 1, 1, 1, 'BelowPass', 10, 80),
+			(3, 1, 1, 1, 'LateWork', 10, 80),
+			(4, 1, 1, 1, 'RedoFlagged', 10, 80),
+			(5, 1, 1, 1, 'Cheated', 10, 80),
+			(6, 1, 1, 1, 'Passed', 10, 80)`,
+		// flags: late=1, missing=2, pass=4, redo=8, cheat=16
+		`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count) VALUES
+			(1, 1, 9, 8, 1),
+			(2, 1, 7, 0, 0),
+			(3, 1, NULL, 1, 0),
+			(4, 1, NULL, 8, 0),
+			(5, 1, 0, 16, 0),
+			(6, 1, 10, 4, 0)`,
+	}
+	for _, stmt := range statements {
+		if _, err := conn.Exec(stmt); err != nil {
+			conn.Close()
+			t.Fatalf("seed stmt failed: %v", err)
+		}
+	}
+	conn.Close()
+
+	portalApp.v.Set("context.year", "2026-27")
+	portalApp.v.Set("context.term_id", 1)
+	portalApp.v.Set("context.course_year_id", 1)
+	if err := portalApp.v.WriteConfig(); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	snapshot, err := portalApp.buildPortalCourseSnapshot(1, 1)
+	if err != nil {
+		t.Fatalf("build portal course snapshot: %v", err)
+	}
+	if len(snapshot.Students) != 1 {
+		t.Fatalf("expected 1 student snapshot, got %d", len(snapshot.Students))
+	}
+	tips := snapshot.Students[0].ImprovementTips
+
+	expectTip := map[string]bool{
+		"RedoDone":    false, // redo flag but score 90% >= 80% pass rate
+		"BelowPass":   true,  // 70% < 80% pass rate, no redo flag needed
+		"LateWork":    true,  // late flag, no score
+		"RedoFlagged": true,  // redo flag, no score
+		"Cheated":     false, // cheat flag excluded
+		"Passed":      false, // pass flag excluded
+	}
+	for title, want := range expectTip {
+		got := false
+		for _, tip := range tips {
+			if strings.Contains(tip, title) {
+				got = true
+			}
+		}
+		if got != want {
+			t.Fatalf("tip for %s: got %v, want %v (tips: %v)", title, got, want, tips)
+		}
+	}
+}
+
 func portalFixedNow() time.Time {
 	return time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 }

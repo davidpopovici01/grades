@@ -1,3 +1,5 @@
+import { classifyAction } from '../assignments';
+
 function formatPercent(value) {
   if (value === null || value === undefined || isNaN(value)) return '—';
   return `${value.toFixed(1)}%`;
@@ -19,17 +21,15 @@ export function ImprovementSummary({ grades }) {
     );
   }
 
-  // Filter to assignments after cutoff (the ones that matter now)
-  const relevantAssignments = grades.assignments?.filter((a) => !a.isBeforeCutoff) || [];
-  const missing = relevantAssignments.filter((a) => a.flags?.includes('missing'));
-  const redo = relevantAssignments.filter((a) => a.flags?.includes('redo'));
-  const late = relevantAssignments.filter((a) => a.flags?.includes('late'));
-  const belowPass = relevantAssignments.filter(
-    (a) => a.score !== null && a.score !== undefined && a.currentPercent < (a.passPercent || 60)
-  );
+  // Classify actionable assignments the same way the CLI's grades overview
+  // does: after the cutoff, in overview-visible categories only.
+  const assignments = grades.assignments || [];
+  const missing = assignments.filter((a) => classifyAction(a) === 'missing');
+  const redo = assignments.filter((a) => classifyAction(a) === 'redo');
+  const late = assignments.filter((a) => classifyAction(a) === 'late');
 
   // Find lowest active category
-  const activeCategories = grades.categories?.filter((c) => c.included) || [];
+  const activeCategories = grades.categories?.filter((c) => c.included && c.showInOverview !== false) || [];
   const lowestCategory = activeCategories.length > 0
     ? activeCategories.reduce((min, c) => (c.score < min.score ? c : min), activeCategories[0])
     : null;
@@ -98,18 +98,6 @@ export function ImprovementSummary({ grades }) {
       <span key="lowest">
         Your lowest active category is <strong>{lowestCategory.categoryName}</strong> at{' '}
         {formatPercent(lowestCategory.score)}. Focus your next efforts here to boost your overall grade.
-      </span>
-    );
-  }
-
-  if (belowPass.length > 0 && missing.length === 0 && redo.length === 0) {
-    const count = belowPass.length;
-    bullets.push(
-      <span key="below">
-        <strong>{count} assignment{count > 1 ? 's are' : ' is'}</strong> currently below the pass threshold.
-        {count === 1
-          ? ` Review "${belowPass[0].title}" and ask for help if needed.`
-          : ' Review them and consider asking for extra help.'}
       </span>
     );
   }

@@ -55,6 +55,7 @@ type portalCategorySnapshot struct {
 	DefaultPassPercent float64 `json:"defaultPassPercent,omitempty"`
 	Included           bool    `json:"included"`
 	ShowInOverview     bool    `json:"showInOverview"`
+	DropLowest         int     `json:"dropLowest,omitempty"`
 }
 
 type portalAssignmentSnapshot struct {
@@ -73,6 +74,7 @@ type portalAssignmentSnapshot struct {
 	CurrentPercent      float64  `json:"currentPercent"`
 	CurrentPercentLabel string   `json:"currentPercentLabel"`
 	ShowInOverview      bool     `json:"showInOverview"`
+	Dropped             bool     `json:"dropped,omitempty"`
 }
 
 type portalCourseSnapshot struct {
@@ -87,11 +89,20 @@ type portalCourseSnapshot struct {
 
 type portalPublishRequest struct {
 	Accounts []portalauth.Account `json:"accounts"`
+	IDMap    []portalIDMapping    `json:"idMap,omitempty"`
 	Course   portalCourseInfo     `json:"course"`
 	Students []struct {
 		StudentID int             `json:"studentId"`
 		Snapshot  json.RawMessage `json:"snapshot"`
 	} `json:"students"`
+}
+
+// portalIDMapping tells the portal server which local student ID each
+// username belongs to now, so the server can re-key its data after local
+// student IDs were renumbered (e.g. by `grades students sort`).
+type portalIDMapping struct {
+	StudentID int    `json:"studentId"`
+	Username  string `json:"username"`
 }
 
 type portalCourseInfo struct {
@@ -182,9 +193,14 @@ func (a *App) PushStudentPortal(baseURL string) error {
 	if err != nil {
 		return err
 	}
+	idMap, err := a.portalAccountIDMap()
+	if err != nil {
+		return err
+	}
 
 	payload := portalPublishRequest{
 		Accounts: accounts,
+		IDMap:    idMap,
 		Course: portalCourseInfo{
 			CourseYearID:   snapshot.CourseYearID,
 			TermID:         snapshot.TermID,
@@ -583,7 +599,7 @@ func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYear
 	if err != nil {
 		return portalStudentSnapshot{}, err
 	}
-	categorySnapshots, weightedTotal, weightedLabel, activeCategoryCount := portalCategorySnapshots(rules, details)
+	categorySnapshots, weightedTotal, weightedLabel, activeCategoryCount, droppedByAssignment := portalCategorySnapshots(rules, details)
 	showInOverviewByCategory := map[int]bool{}
 	for _, rule := range rules {
 		showInOverviewByCategory[rule.CategoryID] = rule.IsVisibleInOverview()
@@ -636,9 +652,10 @@ func (a *App) buildPortalStudentSnapshot(courseName, termName string, courseYear
 			CurrentPercent:      currentPercent,
 			CurrentPercentLabel: fmt.Sprintf("%.1f%%", currentPercent),
 			ShowInOverview:      showInOverviewByCategory[detail.CategoryID],
+			Dropped:             droppedByAssignment[detail.AssignmentID],
 		})
 	}
-	item.ImprovementTips = portalImprovementTips(item.Assignments, item.Categories, cutoff)
+	item.ImprovementTips = portalImprovementTips(details, showInOverviewByCategory, item.Categories, cutoff)
 	return item, nil
 }
 
@@ -676,7 +693,7 @@ func (a *App) studentSectionsForPortal(studentID, courseYearID, termID int) ([]s
 	return out, rows.Err()
 }
 
-func portalCategorySnapshots(rules []CategoryRule, details []portalAssignmentDetail) ([]portalCategorySnapshot, float64, string, int) {
+func portalCategorySnapshots(rules []CategoryRule, details []portalAssignmentDetail) ([]portalCategorySnapshot, float64, string, int, map[int]bool) {
 	assignmentsByCategory := map[int][]portalAssignmentDetail{}
 	for _, detail := range details {
 		assignmentsByCategory[detail.CategoryID] = append(assignmentsByCategory[detail.CategoryID], detail)
@@ -685,9 +702,13 @@ func portalCategorySnapshots(rules []CategoryRule, details []portalAssignmentDet
 	weightedTotal := 0.0
 	totalWeight := 0.0
 	activeCategories := 0
+	droppedByAssignment := map[int]bool{}
 	for _, rule := range rules {
 		items := assignmentsByCategory[rule.CategoryID]
-		score, included := portalCategoryScore(rule, items)
+		score, included, dropped := portalCategoryScoreWithDrops(rule, items)
+		for id := range dropped {
+			droppedByAssignment[id] = true
+		}
 		passPercent := 0.0
 		if rule.DefaultPassPercent.Valid {
 			passPercent = rule.DefaultPassPercent.Float64
@@ -717,6 +738,7 @@ func portalCategorySnapshots(rules []CategoryRule, details []portalAssignmentDet
 			DefaultPassPercent: passPercent,
 			Included:           included,
 			ShowInOverview:     rule.IsVisibleInOverview(),
+			DropLowest:         rule.DropLowest,
 		})
 	}
 	weightedLabel := ""
@@ -724,91 +746,88 @@ func portalCategorySnapshots(rules []CategoryRule, details []portalAssignmentDet
 		weightedTotal /= totalWeight
 		weightedLabel = fmt.Sprintf("%.1f%%", weightedTotal)
 	}
-	return snapshots, weightedTotal, weightedLabel, activeCategories
+	return snapshots, weightedTotal, weightedLabel, activeCategories, droppedByAssignment
 }
 
 func portalCategoryScore(rule CategoryRule, items []portalAssignmentDetail) (float64, bool) {
+	score, included, _ := portalCategoryScoreWithDrops(rule, items)
+	return score, included
+}
+
+func portalCategoryScoreWithDrops(rule CategoryRule, items []portalAssignmentDetail) (float64, bool, map[int]bool) {
 	hasEntry := false
-	switch rule.SchemeKey {
-	case "completion":
-		if len(items) == 0 {
-			return 0, false
+	candidates := make([]dropCandidate, 0, len(items))
+	for _, item := range items {
+		if portalAssignmentHasEntry(item.Grade) {
+			hasEntry = true
 		}
-		total := 0.0
-		count := 0
-		for _, item := range items {
-			if portalAssignmentHasEntry(item.Grade) {
-				hasEntry = true
-			}
-			if !countsTowardAssignmentAverage(item.Grade) {
-				continue
-			}
-			total += effectiveAssignmentPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift)
-			count++
+		if !countsTowardAssignmentAverage(item.Grade) {
+			continue
 		}
-		if !hasEntry || count == 0 {
-			return 0, false
-		}
-		return total / float64(count), true
-	case "total-points":
+		candidates = append(candidates, dropCandidate{
+			id:        item.AssignmentID,
+			maxPoints: item.Grade.MaxPoints,
+			percent:   effectiveAssignmentPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift),
+		})
+	}
+	if !hasEntry || len(candidates) == 0 {
+		return 0, false, nil
+	}
+	dropped := dropLowestIDs(candidates, rule.DropLowest)
+	if rule.SchemeKey == "total-points" {
 		sum := 0.0
 		maxTotal := 0.0
-		for _, item := range items {
-			if portalAssignmentHasEntry(item.Grade) {
-				hasEntry = true
-			}
-			if !countsTowardAssignmentAverage(item.Grade) {
+		for _, candidate := range candidates {
+			if dropped[candidate.id] {
 				continue
 			}
-			maxTotal += float64(item.Grade.MaxPoints)
-			sum += (effectiveAssignmentPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift) / 100) * float64(item.Grade.MaxPoints)
+			maxTotal += float64(candidate.maxPoints)
+			sum += (candidate.percent / 100) * float64(candidate.maxPoints)
 		}
-		if !hasEntry || maxTotal == 0 {
-			return 0, false
+		if maxTotal == 0 {
+			return 0, false, nil
 		}
-		return (sum / maxTotal) * 100, true
-	default:
-		if len(items) == 0 {
-			return 0, false
-		}
-		total := 0.0
-		count := 0
-		for _, item := range items {
-			if portalAssignmentHasEntry(item.Grade) {
-				hasEntry = true
-			}
-			if !countsTowardAssignmentAverage(item.Grade) {
-				continue
-			}
-			total += effectiveAssignmentPercent(item.Grade, item.Grade.PassPercent, item.Anchor, item.Lift)
-			count++
-		}
-		if !hasEntry || count == 0 {
-			return 0, false
-		}
-		return total / float64(count), true
+		return (sum / maxTotal) * 100, true, dropped
 	}
+	total := 0.0
+	count := 0
+	for _, candidate := range candidates {
+		if dropped[candidate.id] {
+			continue
+		}
+		total += candidate.percent
+		count++
+	}
+	return total / float64(count), true, dropped
 }
 
 func portalAssignmentHasEntry(record GradeRecord) bool {
 	return record.Score.Valid || record.Flags != 0
 }
 
-func portalImprovementTips(assignments []portalAssignmentSnapshot, categories []portalCategorySnapshot, cutoff int) []string {
+// portalImprovementTips mirrors the CLI's grades overview logic
+// (studentStatusGroups / hasPendingRedo): per assignment after the cutoff, in
+// overview-visible categories only, report Missing, pending Redo, and Late
+// work. The redo flag stays on a record after the work is redone, so a redo
+// counts only while hasPendingRedo says it is outstanding.
+func portalImprovementTips(details []portalAssignmentDetail, visibleByCategory map[int]bool, categories []portalCategorySnapshot, cutoff int) []string {
 	var tips []string
-	for _, item := range assignments {
+	for _, item := range details {
 		// Skip assignments before the overview cutoff.
 		if cutoff > 0 && item.AssignmentID <= cutoff {
 			continue
 		}
 		// Skip assignments in categories hidden from the overview.
-		if !item.ShowInOverview {
+		if !visibleByCategory[item.CategoryID] {
 			continue
 		}
-		if containsFlag(item.Flags, "missing") {
+		switch {
+		case item.Grade.Flags&flagMissing != 0:
 			tips = append(tips, "Finish missing work: "+item.Title)
-		} else if containsFlag(item.Flags, "redo") {
+		case hasPendingRedo(item.Grade, item.Grade.PassPercent):
 			tips = append(tips, "Redo and resubmit: "+item.Title)
+		case item.Grade.Flags&flagLate != 0 && !item.Grade.Score.Valid:
+			tips = append(tips, "Turn in late work: "+item.Title)
 		}
 	}
 	var lowest *portalCategorySnapshot
@@ -830,15 +849,6 @@ func portalImprovementTips(assignments []portalAssignmentSnapshot, categories []
 		tips = append(tips, "Keep entering work in each category so more of your grade becomes active.")
 	}
 	return tips
-}
-
-func containsFlag(flags []string, want string) bool {
-	for _, flag := range flags {
-		if strings.EqualFold(flag, want) {
-			return true
-		}
-	}
-	return false
 }
 
 type portalAssignmentDetail struct {
@@ -1046,6 +1056,27 @@ func (a *App) portalAccountsForCourseTerm(courseYearID, termID int) ([]portalaut
 		return nil, err
 	}
 	return accounts, nil
+}
+
+// portalAccountIDMap returns the current local student ID for every portal
+// username, across all courses. The portal server uses it to re-key its
+// stored data after local student IDs were renumbered.
+func (a *App) portalAccountIDMap() ([]portalIDMapping, error) {
+	rows, err := a.db.Query(`SELECT student_pk, username FROM student_accounts ORDER BY student_pk`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var mappings []portalIDMapping
+	for rows.Next() {
+		var m portalIDMapping
+		if err := rows.Scan(&m.StudentID, &m.Username); err != nil {
+			return nil, err
+		}
+		mappings = append(mappings, m)
+	}
+	return mappings, rows.Err()
 }
 
 func (s *portalServer) routes() http.Handler {

@@ -93,9 +93,12 @@ grades students add
 grades students remove [student]
 grades students list
 grades students show <student>
+grades students edit [student]
+grades students edit id
 grades students import-powerschool <file>
 grades students deactivate [student]
 grades students activate [student]
+grades students sort
 ```
 
 ## Categories
@@ -110,13 +113,28 @@ grades categories pass-rate <category> <percent|raw>
 grades categories show <category>
 grades categories hide <category>
 grades categories set-visibility <category> <true|false>
+grades categories drop-lowest <category> <n>
 grades categories import [file]
+grades categories copy-year [course-year]
 grades categories setup-csv [file]
 grades categories scores
 grades categories totals
 ```
 
 `show`, `hide`, and `set-visibility` control whether a category appears in the overview.
+
+`drop-lowest` drops each student's N lowest assignment scores in the category (0 disables it). Missing work counts as 0%, so it is dropped first; at least one assignment always remains.
+
+`copy-year` copies the whole category setup (schemes, pass rates, overview visibility, drop-lowest rules, and weights) from another course-year into the current course-year and term. With no argument it picks the most recent other year of the same course — i.e. last year. Typical start-of-year flow:
+
+```powershell
+grades use year "2026-27"      # keeps your course and section when they exist in the new year
+grades use term "Semester 1"
+grades categories copy-year    # copies last year's setup
+grades categories list         # review
+```
+
+For `import`, the CSV columns are `category`, `weight`, `scheme`, `pass_rate`, `show_in_overview`, `drop_lowest`. `scheme` is `completion` (needs a `pass_rate` like `80`) or `average` (use `pass_rate` = `raw`); `weight` is a plain number of percent (e.g. `40`); `show_in_overview` is `TRUE`/`FALSE` (blank keeps the default); `drop_lowest` is a non-negative integer (blank or `0` keeps everything). Rows whose first cell starts with `#` are ignored.
 
 ## Assignments
 

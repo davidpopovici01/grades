@@ -13,10 +13,15 @@ Environment="PORTAL_JWT_SECRET_FILE=/opt/portal/.jwt-secret"
 Environment="PORTAL_TEACHER_TOKEN_FILE=/opt/portal/.teacher-token"
 Environment="PORTAL_ADDR=:8080"
 Environment="PORTAL_COOKIE_SECURE=true"
+Environment="PORTAL_COOKIE_DOMAIN=mrpopovici.com"
 Environment="PORTAL_RATE_LIMIT=300"
+Environment="PORTAL_MATERIALS_DIR=/opt/portal/materials"
+Environment="PORTAL_SUBMISSIONS_DIR=/opt/portal/submissions"
+Environment="PORTAL_JPLAG_JAR=/opt/portal/lib/jplag.jar"
 ExecStart=/opt/portal/portal
 Restart=on-failure
 RestartSec=5
+MemoryMax=1536M
 
 [Install]
 WantedBy=multi-user.target

@@ -57,8 +57,25 @@ function effectiveAssignmentPercent(item) {
   return percent;
 }
 
-function computeCategoryScore(items, schemeKey) {
+function dropLowestIds(items, n) {
+  const candidates = items
+    .filter(countsTowardAverage)
+    .map((item) => ({
+      id: item.assignmentId ?? item.id,
+      maxPoints: item.maxPoints,
+      percent: effectiveAssignmentPercent(item),
+    }));
+  if (n <= 0 || candidates.length <= 1) return new Set();
+  candidates.sort((a, b) =>
+    a.percent - b.percent || b.maxPoints - a.maxPoints || String(a.id).localeCompare(String(b.id)));
+  const dropCount = Math.min(n, candidates.length - 1);
+  return new Set(candidates.slice(0, dropCount).map((c) => c.id));
+}
+
+function computeCategoryScore(items, schemeKey, dropLowest = 0) {
   let hasEntry = false;
+  const dropped = dropLowestIds(items, dropLowest);
+  const isDropped = (item) => dropped.has(item.assignmentId ?? item.id);
 
   switch (schemeKey) {
     case 'completion': {
@@ -67,7 +84,7 @@ function computeCategoryScore(items, schemeKey) {
       let count = 0;
       for (const item of items) {
         if (assignmentHasEntry(item)) hasEntry = true;
-        if (!countsTowardAverage(item)) continue;
+        if (!countsTowardAverage(item) || isDropped(item)) continue;
         total += effectiveAssignmentPercent(item);
         count++;
       }
@@ -79,7 +96,7 @@ function computeCategoryScore(items, schemeKey) {
       let maxTotal = 0;
       for (const item of items) {
         if (assignmentHasEntry(item)) hasEntry = true;
-        if (!countsTowardAverage(item)) continue;
+        if (!countsTowardAverage(item) || isDropped(item)) continue;
         maxTotal += item.maxPoints;
         sum += (effectiveAssignmentPercent(item) / 100) * item.maxPoints;
       }
@@ -92,7 +109,7 @@ function computeCategoryScore(items, schemeKey) {
       let count = 0;
       for (const item of items) {
         if (assignmentHasEntry(item)) hasEntry = true;
-        if (!countsTowardAverage(item)) continue;
+        if (!countsTowardAverage(item) || isDropped(item)) continue;
         total += effectiveAssignmentPercent(item);
         count++;
       }
@@ -159,8 +176,8 @@ export function WhatIfStudio({ grades }) {
 
       return {
         ...cat,
-        _baseScore: computeCategoryScore(baseAssignments, cat.schemeKey),
-        _score: computeCategoryScore(withScenarios, cat.schemeKey),
+        _baseScore: computeCategoryScore(baseAssignments, cat.schemeKey, cat.dropLowest || 0),
+        _score: computeCategoryScore(withScenarios, cat.schemeKey, cat.dropLowest || 0),
         _scenarioCount: catScenarios.length,
       };
     });
@@ -333,6 +350,11 @@ export function WhatIfStudio({ grades }) {
                 <tr key={cat.categoryId}>
                   <td className="px-6 py-3">
                     {cat.categoryName}
+                    {cat.dropLowest > 0 && (
+                      <span className="ml-2 text-xs text-gray-400">
+                        drops lowest {cat.dropLowest}
+                      </span>
+                    )}
                     {cat._scenarioCount > 0 && (
                       <span className="ml-2 text-xs text-blue-600 font-medium">
                         +{cat._scenarioCount} scenario{cat._scenarioCount > 1 ? 's' : ''}

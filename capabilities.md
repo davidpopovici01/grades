@@ -242,6 +242,10 @@ grades students list
 
 grades students show <student-id>
 
+grades students edit [student]
+
+grades students sort
+
 ```
 
 

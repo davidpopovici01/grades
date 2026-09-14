@@ -17,7 +17,11 @@ func main() {
 		DBPath:          getEnv("PORTAL_DB_PATH", filepath.Join(os.TempDir(), "grades-portal.db")),
 		Addr:            getEnv("PORTAL_ADDR", ":8080"),
 		CookieSecure:    getEnvBool("PORTAL_COOKIE_SECURE", false),
+		CookieDomain:    getEnv("PORTAL_COOKIE_DOMAIN", ""),
 		RateLimitPerMin: getEnvInt("PORTAL_RATE_LIMIT", 300),
+		MaterialsDir:    getEnv("PORTAL_MATERIALS_DIR", "./materials"),
+		SubmissionsDir:  getEnv("PORTAL_SUBMISSIONS_DIR", "./submissions"),
+		JPlagJar:        getEnv("PORTAL_JPLAG_JAR", "/opt/portal/lib/jplag.jar"),
 		TeacherToken:    getTeacherToken(),
 	}
 

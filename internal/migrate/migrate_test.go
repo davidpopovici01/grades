@@ -166,4 +166,12 @@ func TestUp_AppliesOnce(t *testing.T) {
 	if submissionPoliciesTable != 1 {
 		t.Fatalf("expected submission_policies table to exist, got %d", submissionPoliciesTable)
 	}
+
+	var dropLowestColumn int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('category_grading_policies') WHERE name='drop_lowest';`).Scan(&dropLowestColumn); err != nil {
+		t.Fatalf("pragma_table_info category_grading_policies drop_lowest query failed: %v", err)
+	}
+	if dropLowestColumn != 1 {
+		t.Fatalf("expected category_grading_policies.drop_lowest column to exist, got %d", dropLowestColumn)
+	}
 }

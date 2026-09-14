@@ -1,7 +1,27 @@
 import { Link, useLocation } from 'react-router-dom';
 
+// portalHosts returns the canonical URLs of the two subdomains, or null on
+// unrecognized hosts (local dev, custom domains) so links stay same-origin.
+function portalHosts() {
+  const host = window.location.hostname;
+  if (host.startsWith('grades.')) {
+    return { grades: `https://${host}`, materials: `https://materials.${host.slice(7)}` };
+  }
+  if (host.startsWith('materials.')) {
+    return { grades: `https://grades.${host.slice(10)}`, materials: `https://${host}` };
+  }
+  return null;
+}
+
 export function Layout({ user, onLogout, children }) {
   const location = useLocation();
+  const hosts = portalHosts();
+  const onMaterialsHost = window.location.hostname.startsWith('materials.');
+
+  const navClass = (active) =>
+    `px-3 py-1 rounded-md transition ${
+      active ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:text-gray-900'
+    }`;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -11,22 +31,30 @@ export function Layout({ user, onLogout, children }) {
             <div className="flex items-center gap-6">
               <span className="font-semibold text-gray-800">Grades Portal</span>
               <div className="flex gap-4 text-sm">
-                <Link
-                  to="/"
-                  className={`px-3 py-1 rounded-md transition ${
-                    location.pathname === '/' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  Grades
-                </Link>
-                <Link
-                  to="/what-if"
-                  className={`px-3 py-1 rounded-md transition ${
-                    location.pathname === '/what-if' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                >
+                {onMaterialsHost && hosts ? (
+                  <a href={hosts.grades} className={navClass(false)}>
+                    Grades
+                  </a>
+                ) : (
+                  <Link to="/" className={navClass(location.pathname === '/')}>
+                    Grades
+                  </Link>
+                )}
+                <Link to="/what-if" className={navClass(location.pathname === '/what-if')}>
                   What-If
                 </Link>
+                <Link to="/submissions" className={navClass(location.pathname === '/submissions')}>
+                  Submissions
+                </Link>
+                {!onMaterialsHost && hosts ? (
+                  <a href={`${hosts.materials}/materials`} className={navClass(false)}>
+                    Materials
+                  </a>
+                ) : (
+                  <Link to="/materials" className={navClass(location.pathname === '/materials')}>
+                    Materials
+                  </Link>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-3 text-sm">

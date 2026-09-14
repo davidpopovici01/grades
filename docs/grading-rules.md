@@ -71,6 +71,26 @@ Examples:
 - passed, redo -> `90%`
 - passed, late + redo -> `80%`
 
+## Drop Lowest
+
+Each category can drop its N lowest assignment scores per student:
+
+```powershell
+grades categories drop-lowest Quizzes 1
+grades categories drop-lowest Quizzes 0   # back to counting everything
+```
+
+Rules:
+
+- only assignments that count toward the category average are considered (a score or a flag must exist)
+- ranking uses each assignment's effective percent, after curves, pass rates, and late/redo penalties
+- ties drop the higher-point assignment first, then the earlier assignment
+- at least one assignment always remains; a category can never be emptied by dropping
+- missing work counts as `0%`, so it is dropped first
+- `average` / `completion`: dropped assignments leave the mean
+- `total-points`: dropped assignments leave both the earned and possible sums
+- the student portal marks dropped assignments with a `dropped` badge and the What-If Studio applies the same rule
+
 ## Flags
 
 ### Missing

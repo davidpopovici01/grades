@@ -1,28 +1,15 @@
+import { classifyAction } from '../assignments';
+
 export function ActionItems({ grades }) {
   if (!grades?.assignments?.length) return null;
 
-  const actionable = grades.assignments.filter((a) => {
-    if (a.isBeforeCutoff) return false;
-    const hasScore = a.score !== null && a.score !== undefined;
-    const hasMissing = a.flags?.includes('missing');
-    const hasLate = a.flags?.includes('late');
-    const hasRedo = a.flags?.includes('redo');
-
-    // Missing with no score = hasn't been submitted
-    if (hasMissing && !hasScore) return true;
-    // Late with no score = hasn't been submitted
-    if (hasLate && !hasScore) return true;
-    // Redo with no score = hasn't been redone
-    if (hasRedo && !hasScore) return true;
-
-    return false;
-  });
+  const actionable = grades.assignments
+    .map((a) => ({ assignment: a, action: classifyAction(a) }))
+    .filter((item) => item.action !== null);
 
   if (actionable.length === 0) return null;
 
-  const missing = actionable.filter((a) => a.flags?.includes('missing'));
-  const redo = actionable.filter((a) => a.flags?.includes('redo'));
-  const late = actionable.filter((a) => a.flags?.includes('late'));
+  const items = actionable.map((item) => ({ ...item.assignment, action: item.action }));
 
   const FLAG_STYLES = {
     missing: 'bg-red-50 text-red-700 border-red-200',
@@ -35,12 +22,6 @@ export function ActionItems({ grades }) {
     redo: 'Redo',
     late: 'Late',
   };
-
-  const items = [
-    ...missing.map((a) => ({ ...a, action: 'missing' })),
-    ...redo.map((a) => ({ ...a, action: 'redo' })),
-    ...late.map((a) => ({ ...a, action: 'late' })),
-  ];
 
   return (
     <div className="bg-amber-50 rounded-xl border border-amber-200 shadow-sm overflow-hidden">

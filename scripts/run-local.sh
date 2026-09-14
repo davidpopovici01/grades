@@ -46,4 +46,6 @@ PORTAL_JWT_SECRET_FILE="$LOCAL_DIR/jwt-secret" \
 PORTAL_TEACHER_TOKEN_FILE="$LOCAL_DIR/teacher-token" \
 PORTAL_ADDR="localhost:8080" \
 PORTAL_COOKIE_SECURE="false" \
+PORTAL_SUBMISSIONS_DIR="$LOCAL_DIR/submissions" \
+PORTAL_JPLAG_JAR="$LOCAL_DIR/jplag.jar" \
     go run ./cmd/portal

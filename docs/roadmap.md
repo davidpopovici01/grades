@@ -89,20 +89,16 @@ Details: [`portal-deployment.md`](portal-deployment.md)
 
 ## Medium-Term Plans (After Portal)
 
-### 3. Student Code Submission Portal
+### 3. Student Code Submission Portal — Done
 
-Students upload programming assignments. Server runs test cases and returns results.
+Students upload programming assignments from the portal's Submissions page; the server runs teacher-uploaded test harnesses and returns pass/fail counts.
 
-**Requires server-side compute:**
-- File upload endpoint
-- Docker container per submission (CPU/mem limits, timeout, no network)
-- Test runner that executes student code against teacher-defined test cases
-- Result storage and display
+- Submission assignments managed in the admin UI (`/admin/submissions`): exact required filenames, size limits, due date, late penalty; standalone (not linked to gradebook assignments)
+- Java + Python; public tests (student-visible, 30 s test cooldown) and secret tests (admin-only); admin can run all tests on demand, including untested submissions
+- Single-worker run queue with `prlimit` resource caps (30 s wall / 25 s CPU per run; 512 MB address space for Python, 4 GB with a 256 MB heap for Java) instead of Docker — fits the 2 GB VPS
+- Per-assignment plagiarism detection via a locally run JPlag jar
 
-**Architecture:**
-- Same single server handles both grade portal and submission runner
-- Submission queue: simple in-memory or SQLite-backed queue
-- Docker sandbox: one container per run, destroyed after
+Details: [`portal-deployment.md`](portal-deployment.md#code-submissions)
 
 ---
 

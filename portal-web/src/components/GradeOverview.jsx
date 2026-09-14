@@ -81,6 +81,9 @@ export function GradeOverview({ grades }) {
                     <td className="px-6 py-3">
                       {cat.categoryName}
                       <span className="text-xs text-gray-400 ml-2">({cat.schemeKey})</span>
+                      {cat.dropLowest > 0 && (
+                        <span className="text-xs text-gray-400 ml-2">drops lowest {cat.dropLowest}</span>
+                      )}
                     </td>
                     <td className="px-6 py-3 text-right">
                       {cat.hasWeight ? `${cat.weightPercent.toFixed(0)}%` : '—'}
@@ -162,6 +165,11 @@ export function GradeOverview({ grades }) {
                             {flag}
                           </span>
                         ))}
+                        {a.dropped && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500 border border-gray-200">
+                            dropped
+                          </span>
+                        )}
                       </div>
                     </td>
                   </tr>

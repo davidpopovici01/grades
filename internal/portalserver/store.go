@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/davidpopovici01/grades/internal/portalauth"
@@ -71,6 +72,87 @@ func (s *Store) migrate() error {
 			PRIMARY KEY (student_pk, course_year_id, term_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_published_students_course ON published_students(course_year_id, term_id);`,
+		`CREATE TABLE IF NOT EXISTS sub_assignments (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			course_year_id INTEGER NOT NULL,
+			term_id INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			language TEXT NOT NULL,
+			instructions TEXT NOT NULL DEFAULT '',
+			due_at TEXT,
+			expected_filenames TEXT NOT NULL DEFAULT '',
+			max_file_bytes INTEGER NOT NULL DEFAULT 262144,
+			max_total_bytes INTEGER NOT NULL DEFAULT 1048576,
+			late_cap_percent INTEGER NOT NULL DEFAULT 90,
+			is_open INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sub_assignments_course ON sub_assignments(course_year_id, term_id);`,
+		`CREATE TABLE IF NOT EXISTS sub_tests (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			assignment_id INTEGER NOT NULL REFERENCES sub_assignments(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			visibility TEXT NOT NULL DEFAULT 'public',
+			stored_name TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sub_tests_assignment ON sub_tests(assignment_id);`,
+		`CREATE TABLE IF NOT EXISTS sub_submissions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			assignment_id INTEGER NOT NULL REFERENCES sub_assignments(id) ON DELETE CASCADE,
+			student_pk INTEGER NOT NULL,
+			attempt INTEGER NOT NULL DEFAULT 1,
+			submitted_at TEXT NOT NULL,
+			is_late INTEGER NOT NULL DEFAULT 0,
+			cap_percent INTEGER NOT NULL DEFAULT 100
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sub_submissions_assignment ON sub_submissions(assignment_id, student_pk);`,
+		`CREATE TABLE IF NOT EXISTS sub_files (
+			submission_id INTEGER NOT NULL REFERENCES sub_submissions(id) ON DELETE CASCADE,
+			filename TEXT NOT NULL,
+			byte_size INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sub_files_submission ON sub_files(submission_id);`,
+		`CREATE TABLE IF NOT EXISTS sub_test_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			submission_id INTEGER NOT NULL REFERENCES sub_submissions(id) ON DELETE CASCADE,
+			test_id INTEGER NOT NULL REFERENCES sub_tests(id) ON DELETE CASCADE,
+			visibility TEXT NOT NULL DEFAULT 'public',
+			passed INTEGER NOT NULL DEFAULT 0,
+			failed INTEGER NOT NULL DEFAULT 0,
+			output TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			triggered_by TEXT NOT NULL DEFAULT 'student',
+			queued_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			started_at TEXT,
+			finished_at TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sub_test_runs_submission ON sub_test_runs(submission_id);`,
+		`CREATE TABLE IF NOT EXISTS sub_plag_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			assignment_id INTEGER NOT NULL REFERENCES sub_assignments(id) ON DELETE CASCADE,
+			status TEXT NOT NULL DEFAULT 'queued',
+			report_path TEXT NOT NULL DEFAULT '',
+			message TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			finished_at TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sub_plag_runs_assignment ON sub_plag_runs(assignment_id);`,
+		`CREATE TABLE IF NOT EXISTS sub_plag_pairs (
+			run_id INTEGER NOT NULL REFERENCES sub_plag_runs(id) ON DELETE CASCADE,
+			student_a INTEGER NOT NULL,
+			student_b INTEGER NOT NULL,
+			similarity REAL NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sub_plag_pairs_run ON sub_plag_pairs(run_id);`,
+		`CREATE TABLE IF NOT EXISTS activity_events (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			student_pk INTEGER,
+			username   TEXT NOT NULL DEFAULT '',
+			kind       TEXT NOT NULL,
+			detail     TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_activity_events_created ON activity_events(id DESC);`,
 	}
 	for _, stmt := range statements {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -78,7 +160,15 @@ func (s *Store) migrate() error {
 		}
 	}
 	// Databases created before course_year_name existed need the column added.
-	return s.addColumnIfMissing("published_courses", "course_year_name", `TEXT NOT NULL DEFAULT ''`)
+	if err := s.addColumnIfMissing("published_courses", "course_year_name", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	// Databases created before plagiarism run messages existed need the column added.
+	if err := s.addColumnIfMissing("sub_plag_runs", "message", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	// Databases created before activity tracking existed need the column added.
+	return s.addColumnIfMissing("published_accounts", "last_seen_at", `TEXT`)
 }
 
 // addColumnIfMissing adds a column to a table when it does not exist yet.
@@ -137,6 +227,7 @@ func (s *Store) GetAccountByStudentID(studentID int) (*portalauth.Account, error
 // standalone or inside a transaction.
 type dbtx interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
 }
 
@@ -149,6 +240,12 @@ func (s *Store) PublishCourse(req *PublishRequest) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if len(req.IDMap) > 0 {
+		if err := remapStudentIDs(tx, req.IDMap); err != nil {
+			return fmt.Errorf("remap student IDs: %w", err)
+		}
+	}
 
 	for _, acc := range req.Accounts {
 		if err := upsertAccount(tx, acc); err != nil {
@@ -167,7 +264,116 @@ func (s *Store) PublishCourse(req *PublishRequest) error {
 		}
 	}
 
+	keepIDs := make([]int, 0, len(req.Students))
+	for _, student := range req.Students {
+		keepIDs = append(keepIDs, student.StudentID)
+	}
+	if err := deleteOtherStudentSnapshots(tx, c.CourseYearID, c.TermID, keepIDs); err != nil {
+		return fmt.Errorf("remove stale snapshots for course %d/%d: %w", c.CourseYearID, c.TermID, err)
+	}
+
 	return tx.Commit()
+}
+
+const studentIDRemapOffset = 1_000_000_000
+
+// studentIDKeyedTables lists every server table keyed by student ID, so a
+// renumbering moves accounts, snapshots, and submissions together.
+var studentIDKeyedTables = []struct {
+	table  string
+	column string
+}{
+	{"published_accounts", "student_pk"},
+	{"published_students", "student_pk"},
+	{"sub_submissions", "student_pk"},
+	{"sub_plag_pairs", "student_a"},
+	{"sub_plag_pairs", "student_b"},
+}
+
+// remapStudentIDs renumbers server-side student IDs to the publisher's current
+// local IDs, matched by username (the stable cross-database identity).
+// Accounts the publisher no longer knows are deleted so their IDs and
+// usernames cannot collide with the remapped ones.
+func remapStudentIDs(db dbtx, idMap []PortalIDMapping) error {
+	newIDByUsername := make(map[string]int, len(idMap))
+	for _, m := range idMap {
+		newIDByUsername[strings.ToLower(m.Username)] = m.StudentID
+	}
+
+	rows, err := db.Query(`SELECT student_pk, username FROM published_accounts`)
+	if err != nil {
+		return err
+	}
+	moves := map[int]int{}
+	var orphans []int
+	for rows.Next() {
+		var id int
+		var username string
+		if err := rows.Scan(&id, &username); err != nil {
+			rows.Close()
+			return err
+		}
+		newID, ok := newIDByUsername[strings.ToLower(username)]
+		switch {
+		case !ok:
+			orphans = append(orphans, id)
+		case newID != id:
+			moves[id] = newID
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, id := range orphans {
+		if _, err := db.Exec(`DELETE FROM published_accounts WHERE student_pk = ?`, id); err != nil {
+			return err
+		}
+	}
+
+	for oldID := range moves {
+		for _, ref := range studentIDKeyedTables {
+			if _, err := db.Exec(
+				fmt.Sprintf(`UPDATE %s SET %s = %s + ? WHERE %s = ?`, ref.table, ref.column, ref.column, ref.column),
+				studentIDRemapOffset, oldID); err != nil {
+				return err
+			}
+		}
+	}
+	for oldID, newID := range moves {
+		for _, ref := range studentIDKeyedTables {
+			if _, err := db.Exec(
+				fmt.Sprintf(`UPDATE %s SET %s = ? WHERE %s = ?`, ref.table, ref.column, ref.column),
+				newID, oldID+studentIDRemapOffset); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// deleteOtherStudentSnapshots removes snapshots for a course that are not in
+// the published roster: students removed from the course, or rows left under
+// old IDs after local student IDs were renumbered.
+func deleteOtherStudentSnapshots(db dbtx, courseYearID, termID int, keepIDs []int) error {
+	if len(keepIDs) == 0 {
+		_, err := db.Exec(`DELETE FROM published_students WHERE course_year_id = ? AND term_id = ?`, courseYearID, termID)
+		return err
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keepIDs)), ",")
+	args := make([]any, 0, len(keepIDs)+2)
+	args = append(args, courseYearID, termID)
+	for _, id := range keepIDs {
+		args = append(args, id)
+	}
+	_, err := db.Exec(
+		`DELETE FROM published_students WHERE course_year_id = ? AND term_id = ? AND student_pk NOT IN (`+placeholders+`)`,
+		args...)
+	return err
 }
 
 // upsertAccount inserts or updates an account, preserving a newer VPS-side password.
@@ -187,11 +393,38 @@ func upsertAccount(db dbtx, acc portalauth.Account) error {
 		return err
 	}
 
-	// If existing has a newer password change, keep it.
-	if err == nil {
+	// Preserve a newer VPS-side password, but only when the stored row is
+	// the same student (same username). After a local ID renumbering the
+	// row stored under this student_pk may belong to someone else.
+	keepAt := publishedAt
+	if err == nil && existing.Username == acc.Username {
 		existingAt, err := time.Parse(time.RFC3339, existingChangedAt)
-		if err == nil && existingAt.After(publishedAt) {
+		if err == nil && existingAt.After(keepAt) {
 			acc = existing
+			keepAt = existingAt
+		}
+	}
+
+	// A row with the same username under a different student_pk is stale
+	// (local student IDs were renumbered). Adopt its password when newer,
+	// then remove it so the UNIQUE username constraint cannot collide.
+	var stale portalauth.Account
+	var staleChangedAt string
+	staleErr := db.QueryRow(`
+		SELECT student_pk, username, password_salt, password_hash, must_change_password, password_changed_at
+		FROM published_accounts WHERE username = ? AND student_pk != ?`, acc.Username, acc.StudentID).
+		Scan(&stale.StudentID, &stale.Username, &stale.PasswordSalt, &stale.PasswordHash, &stale.MustChangePassword, &staleChangedAt)
+	if staleErr != nil && staleErr != sql.ErrNoRows {
+		return staleErr
+	}
+	if staleErr == nil {
+		if staleAt, parseErr := time.Parse(time.RFC3339, staleChangedAt); parseErr == nil && staleAt.After(keepAt) {
+			incomingID := acc.StudentID
+			acc = stale
+			acc.StudentID = incomingID
+		}
+		if _, err := db.Exec(`DELETE FROM published_accounts WHERE student_pk = ?`, stale.StudentID); err != nil {
+			return err
 		}
 	}
 
@@ -269,12 +502,13 @@ func (s *Store) GetCourse(courseYearID, termID int) (*CourseInfo, error) {
 	return &c, nil
 }
 
-// ListCourses returns all published courses ordered by name.
+// ListCourses returns all published courses, newest year and term first
+// (course_year_id and term_id increase with each new year/term on the laptop).
 func (s *Store) ListCourses() ([]CourseInfo, error) {
 	rows, err := s.db.Query(`
 		SELECT course_year_id, term_id, course_name, course_year_name, term_name, published_at
 		FROM published_courses
-		ORDER BY course_name, term_name`)
+		ORDER BY course_year_id DESC, term_id DESC, course_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +540,38 @@ func (s *Store) DeleteCourse(courseYearID, termID int) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// SnapshotRow is one student's raw snapshot JSON for server-side parsing.
+type SnapshotRow struct {
+	StudentID int
+	Username  string
+	Raw       []byte
+}
+
+// ListSnapshotRowsForCourse returns raw student snapshots with usernames,
+// ordered like ListStudentsForCourse.
+func (s *Store) ListSnapshotRowsForCourse(courseYearID, termID int) ([]SnapshotRow, error) {
+	rows, err := s.db.Query(`
+		SELECT ps.student_pk, ps.snapshot_json, COALESCE(pa.username, '')
+		FROM published_students ps
+		LEFT JOIN published_accounts pa ON pa.student_pk = ps.student_pk
+		WHERE ps.course_year_id = ? AND ps.term_id = ?
+		ORDER BY ps.student_pk`, courseYearID, termID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []SnapshotRow{}
+	for rows.Next() {
+		var row SnapshotRow
+		if err := rows.Scan(&row.StudentID, &row.Raw, &row.Username); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 // upsertStudentSnapshot inserts or updates a student's course snapshot.
@@ -419,9 +685,18 @@ type AdminStudent struct {
 // PublishRequest is the payload sent by the CLI to publish a course snapshot.
 type PublishRequest struct {
 	Accounts []portalauth.Account `json:"accounts"`
+	IDMap    []PortalIDMapping    `json:"idMap"`
 	Course   CourseInfo           `json:"course"`
 	Students []struct {
 		StudentID int             `json:"studentId"`
 		Snapshot  json.RawMessage `json:"snapshot"`
 	} `json:"students"`
+}
+
+// PortalIDMapping tells the server which student ID each username belongs to
+// in the publisher's database right now, so the server can re-key its stored
+// data after the publisher renumbered local student IDs.
+type PortalIDMapping struct {
+	StudentID int    `json:"studentId"`
+	Username  string `json:"username"`
 }

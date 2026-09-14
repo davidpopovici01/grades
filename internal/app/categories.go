@@ -41,13 +41,13 @@ func (a *App) ListCategories() error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(a.out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "Category\tWeight\tScoring\tDefault pass\tOverview")
+	fmt.Fprintln(tw, "Category\tWeight\tScoring\tDefault pass\tDrop lowest\tOverview")
 	for _, rule := range rules {
 		weightLabel := "unweighted"
 		if rule.HasWeight {
 			weightLabel = fmt.Sprintf("%.1f%%", rule.WeightPercent)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", rule.CategoryName, weightLabel, categoryScoringLabel(rule), passPercentLabel(rule.DefaultPassPercent, true), categoryOverviewLabel(rule))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", rule.CategoryName, weightLabel, categoryScoringLabel(rule), passPercentLabel(rule.DefaultPassPercent, true), dropLowestLabel(rule.DropLowest), categoryOverviewLabel(rule))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -131,6 +131,63 @@ func (a *App) upsertCategoryShowInOverview(courseYearID, termID, categoryID int,
 	return err
 }
 
+func (a *App) upsertCategoryDropLowest(courseYearID, termID, categoryID, n int) error {
+	_, err := a.db.Exec(`
+		INSERT INTO category_grading_policies(course_year_id, term_id, category_id, scheme_key, default_pass_percent, drop_lowest)
+		VALUES (?, ?, ?, 'average', NULL, ?)
+		ON CONFLICT(course_year_id, term_id, category_id) DO UPDATE
+		SET drop_lowest = excluded.drop_lowest`,
+		courseYearID, termID, categoryID, n)
+	return err
+}
+
+func (a *App) SetCategoryDropLowest(value, raw string) error {
+	ctx := a.context()
+	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return errors.New("set year, term, and course first")
+	}
+	categoryID, categoryName, err := a.resolveCategoryInteractive(value)
+	if err != nil {
+		return err
+	}
+	n, err := parseDropLowestSetting(raw)
+	if err != nil {
+		return err
+	}
+	if err := a.upsertCategoryDropLowest(ctx.CourseYearID, ctx.TermID, categoryID, n); err != nil {
+		return err
+	}
+	if n == 0 {
+		fmt.Fprintf(a.out, "Set drop lowest: %s = off\n", categoryName)
+	} else {
+		fmt.Fprintf(a.out, "Set drop lowest: %s = %d\n", categoryName, n)
+	}
+	return nil
+}
+
+func parseDropLowestSetting(raw string) (int, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch raw {
+	case "", "off", "none", "no":
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid drop lowest: %s", raw)
+	}
+	if n < 0 {
+		return 0, errors.New("drop lowest must be 0 or greater")
+	}
+	return n, nil
+}
+
+func dropLowestLabel(n int) string {
+	if n <= 0 {
+		return "—"
+	}
+	return strconv.Itoa(n)
+}
+
 func (a *App) SetCategoryShowInOverview(value string, visible bool) error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
@@ -187,7 +244,19 @@ func (a *App) ensureCourseTermScheme(courseYearID, termID int) (int, error) {
 	if err := a.db.QueryRow(`SELECT name FROM terms WHERE term_id = ?`, termID).Scan(&termName); err != nil {
 		return 0, err
 	}
-	res, err := a.db.Exec(`INSERT INTO category_schemes(name) VALUES (?)`, normalizeSpaces(courseName+" "+termName))
+	name := normalizeSpaces(courseName + " " + termName)
+	// The name is globally unique, so a new year of the same course with the
+	// same term name (or a course-year named without a year suffix) would
+	// collide with the old scheme. Suffix with the course-year id to keep
+	// schemes separate per course-year.
+	var taken int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM category_schemes WHERE name = ?`, name).Scan(&taken); err != nil {
+		return 0, err
+	}
+	if taken > 0 {
+		name = fmt.Sprintf("%s (cy%d)", name, courseYearID)
+	}
+	res, err := a.db.Exec(`INSERT INTO category_schemes(name) VALUES (?)`, name)
 	if err != nil {
 		return 0, err
 	}
@@ -438,6 +507,15 @@ func (a *App) ImportCategories(file string) error {
 				return err
 			}
 		}
+		if record.DropLowest != nil {
+			n, err := parseDropLowestSetting(*record.DropLowest)
+			if err != nil {
+				return fmt.Errorf("row %d: %w", rowIndex+2, err)
+			}
+			if err := a.upsertCategoryDropLowest(ctx.CourseYearID, ctx.TermID, categoryID, n); err != nil {
+				return err
+			}
+		}
 		imported++
 	}
 	fmt.Fprintf(a.out, "Imported %d category row(s)\n", imported)
@@ -520,8 +598,8 @@ func (a *App) WriteCategorySetupCSV(file string) error {
 
 	writer := csv.NewWriter(f)
 	data := [][]string{
-		{"category", "weight", "scheme", "pass_rate", "show_in_overview"},
-		{"# example row - importer ignores rows whose first cell starts with #", "40", "completion", "80", "true"},
+		{"category", "weight", "scheme", "pass_rate", "show_in_overview", "drop_lowest"},
+		{"# example row - importer ignores rows whose first cell starts with #", "40", "completion", "80", "true", "1"},
 	}
 	data = append(data, rows...)
 	for _, row := range data {
@@ -563,12 +641,17 @@ func (a *App) categorySetupRows() ([][]string, error) {
 				showInOverview = "false"
 			}
 		}
+		dropLowest := ""
+		if rule.DropLowest > 0 {
+			dropLowest = strconv.Itoa(rule.DropLowest)
+		}
 		out = append(out, []string{
 			rule.CategoryName,
 			weight,
 			rule.SchemeKey,
 			exportPassPercent(rule.DefaultPassPercent),
 			showInOverview,
+			dropLowest,
 		})
 	}
 	return out, nil
@@ -580,6 +663,7 @@ type categoryImportRecord struct {
 	Scheme         string
 	PassRate       *string
 	ShowInOverview *string
+	DropLowest     *string
 }
 
 func categoryImportRecordFromRow(headers map[string]int, row []string) (categoryImportRecord, error) {
@@ -609,6 +693,9 @@ func categoryImportRecordFromRow(headers map[string]int, row []string) (category
 	if raw := get("visible"); raw != "" && record.ShowInOverview == nil {
 		record.ShowInOverview = &raw
 	}
+	if raw := get("drop_lowest"); raw != "" {
+		record.DropLowest = &raw
+	}
 	return record, nil
 }
 
@@ -620,4 +707,143 @@ func exportPassPercent(value sql.NullFloat64) string {
 		return "raw"
 	}
 	return fmt.Sprintf("%.1f", value.Float64)
+}
+
+// CopyCategoriesFromYear copies the category setup — schemes, pass rates,
+// overview visibility, and weights — from another course-year into the current
+// course-year and term. With no name it picks the most recent other
+// course-year of the same course (typically the previous year).
+func (a *App) CopyCategoriesFromYear(name string) error {
+	ctx := a.context()
+	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return errors.New("set year, term, and course first")
+	}
+
+	var srcID int
+	var srcName string
+	if strings.TrimSpace(name) != "" {
+		id, display, err := a.lookupCourseYear(name, "")
+		if err != nil {
+			return err
+		}
+		srcID, srcName = id, display
+	} else {
+		err := a.db.QueryRow(`
+			SELECT course_year_id, name FROM course_years
+			WHERE course_id = (SELECT course_id FROM course_years WHERE course_year_id = ?)
+				AND course_year_id != ?
+			ORDER BY course_year_id DESC LIMIT 1`, ctx.CourseYearID, ctx.CourseYearID).Scan(&srcID, &srcName)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("no other course-year of this course to copy from")
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if srcID == ctx.CourseYearID {
+		return errors.New("cannot copy from the current course-year")
+	}
+
+	type policyRow struct {
+		categoryID int
+		schemeKey  string
+		pass       sql.NullFloat64
+		show       sql.NullBool
+		dropLowest int
+	}
+	rows, err := a.db.Query(`
+		SELECT category_id, scheme_key, default_pass_percent, show_in_overview, drop_lowest
+		FROM category_grading_policies
+		WHERE course_year_id = ? AND term_id = ?`, srcID, ctx.TermID)
+	if err != nil {
+		return err
+	}
+	policies := []policyRow{}
+	for rows.Next() {
+		var p policyRow
+		if err := rows.Scan(&p.categoryID, &p.schemeKey, &p.pass, &p.show, &p.dropLowest); err != nil {
+			rows.Close()
+			return err
+		}
+		policies = append(policies, p)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	var srcSchemeID sql.NullInt64
+	if err := a.db.QueryRow(`
+		SELECT scheme_id FROM course_year_terms
+		WHERE course_year_id = ? AND term_id = ?`, srcID, ctx.TermID).Scan(&srcSchemeID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	if len(policies) == 0 && !srcSchemeID.Valid {
+		return fmt.Errorf("%s has no category setup for the current term", srcName)
+	}
+
+	for _, p := range policies {
+		if err := a.upsertCategoryPolicy(ctx.CourseYearID, ctx.TermID, p.categoryID, p.schemeKey, p.pass); err != nil {
+			return err
+		}
+		if p.show.Valid {
+			if err := a.upsertCategoryShowInOverview(ctx.CourseYearID, ctx.TermID, p.categoryID, p.show.Bool); err != nil {
+				return err
+			}
+		}
+		if p.dropLowest > 0 {
+			if err := a.upsertCategoryDropLowest(ctx.CourseYearID, ctx.TermID, p.categoryID, p.dropLowest); err != nil {
+				return err
+			}
+		}
+	}
+
+	weightsCopied := 0
+	if srcSchemeID.Valid {
+		weightRows, err := a.db.Query(`
+			SELECT category_id, weight_percent FROM category_scheme_weights WHERE scheme_id = ?`, srcSchemeID.Int64)
+		if err != nil {
+			return err
+		}
+		type weightRow struct {
+			categoryID int
+			weight     float64
+		}
+		weights := []weightRow{}
+		for weightRows.Next() {
+			var w weightRow
+			if err := weightRows.Scan(&w.categoryID, &w.weight); err != nil {
+				weightRows.Close()
+				return err
+			}
+			weights = append(weights, w)
+		}
+		if err := weightRows.Close(); err != nil {
+			return err
+		}
+		if len(weights) > 0 {
+			schemeID, err := a.ensureCourseTermScheme(ctx.CourseYearID, ctx.TermID)
+			if err != nil {
+				return err
+			}
+			for _, w := range weights {
+				if _, err := a.db.Exec(`
+					INSERT INTO category_scheme_weights(scheme_id, category_id, weight_percent)
+					VALUES (?, ?, ?)
+					ON CONFLICT(scheme_id, category_id) DO UPDATE SET weight_percent = excluded.weight_percent`,
+					schemeID, w.categoryID, w.weight); err != nil {
+					return err
+				}
+				weightsCopied++
+			}
+		}
+	}
+
+	fmt.Fprintf(a.out, "Copied %d category policies and %d weights from %s.\n", len(policies), weightsCopied, srcName)
+	total, err := a.categoryWeightTotal(ctx.CourseYearID, ctx.TermID)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Total weight:\t%.1f%%\n", total)
+	return nil
 }

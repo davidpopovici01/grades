@@ -68,9 +68,9 @@ grades categories import
 ### CSV Format
 
 ```csv
-category,weight,scheme,pass_rate
-Homework,40,completion,80
-Exam,60,average,raw
+category,weight,scheme,pass_rate,drop_lowest
+Homework,40,completion,80,1
+Exam,60,average,raw,
 ```
 
 Fields:
@@ -79,6 +79,7 @@ Fields:
 - `weight`: required
 - `scheme`: required
 - `pass_rate`: required
+- `drop_lowest`: optional; non-negative integer, blank or `0` counts everything
 
 Rules:
 

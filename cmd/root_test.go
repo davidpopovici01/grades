@@ -3524,3 +3524,88 @@ func TestZeroRedoAppearsInRedoListAndOverview(t *testing.T) {
 	assertContains(t, makeupList, "HW1")
 	assertContains(t, makeupPass, "Recorded PASS for Alice Brown on HW1")
 }
+
+func TestCategoryCopyYearAndYearSwitchKeepsCourse(t *testing.T) {
+	env := newTestEnv(t)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	statements := []string{
+		`INSERT INTO terms(term_id, name, start_date, end_date) VALUES (1, 'Fall', '2025-08-15', '2027-12-20')`,
+		`INSERT INTO courses(course_id, name) VALUES (1, 'APCSA')`,
+		`INSERT INTO course_years(course_year_id, course_id, name) VALUES (1, 1, 'APCSA 2025-26'), (2, 1, 'APCSA 2026-27')`,
+		`INSERT INTO course_year_terms(course_year_id, term_id) VALUES (1, 1), (2, 1)`,
+		`INSERT INTO sections(section_id, course_year_id, name) VALUES (1, 1, '12A'), (2, 2, '12A')`,
+		`INSERT INTO categories(category_id, name) VALUES (1, 'Exam'), (2, 'Homework')`,
+	}
+	for _, stmt := range statements {
+		if _, err := dbConn.Exec(stmt); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	mustRun(t, env, "", "use", "year", "2025-26")
+	mustRun(t, env, "", "use", "term", "1")
+	mustRun(t, env, "", "use", "course", "APCSA")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "", "categories", "set-scheme", "Exam", "completion")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "40")
+	mustRun(t, env, "", "categories", "hide", "Homework")
+
+	// Switching year keeps the course and section when they exist there.
+	out := mustRun(t, env, "", "use", "year", "2026-27")
+	assertContains(t, out, "Using year: 2026-27")
+	assertContains(t, out, "kept course: APCSA, section: 12A")
+	dashboard := mustRun(t, env, "")
+	assertContains(t, dashboard, "APCSA")
+	assertContains(t, dashboard, "12A")
+
+	// Copy the previous year's category setup into the new year.
+	out = mustRun(t, env, "", "categories", "copy-year")
+	assertContains(t, out, "Copied 2 category policies and 1 weights from APCSA 2025-26")
+
+	listed := mustRun(t, env, "", "categories", "list")
+	assertContains(t, listed, "Exam")
+	assertContains(t, listed, "40.0%")
+	assertContains(t, listed, "Pass-rate")
+
+	// The source year is untouched.
+	var weight float64
+	if err := dbConn.QueryRow(`
+		SELECT weight_percent FROM category_scheme_weights w
+		JOIN course_year_terms cyt ON cyt.scheme_id = w.scheme_id
+		WHERE cyt.course_year_id = 1 AND w.category_id = 1`).Scan(&weight); err != nil || weight != 40 {
+		t.Fatalf("source weight: %v %v", weight, err)
+	}
+}
+
+func TestCategorySchemeNameCollisionAcrossCourses(t *testing.T) {
+	env := newTestEnv(t)
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	statements := []string{
+		`INSERT INTO terms(term_id, name, start_date, end_date) VALUES (1, 'Fall', '2025-08-15', '2027-12-20')`,
+		`INSERT INTO courses(course_id, name) VALUES (1, 'APCSA'), (2, 'APCSP')`,
+		// Same course-year name on two different courses used to collide on
+		// the shared "<name> <term>" scheme name.
+		`INSERT INTO course_years(course_year_id, course_id, name) VALUES (1, 1, 'Senior'), (2, 2, 'Senior')`,
+		`INSERT INTO course_year_terms(course_year_id, term_id) VALUES (1, 1), (2, 1)`,
+		`INSERT INTO sections(section_id, course_year_id, name) VALUES (1, 1, '12A'), (2, 2, '12A')`,
+		`INSERT INTO categories(category_id, name) VALUES (1, 'Exam')`,
+	}
+	for _, stmt := range statements {
+		if _, err := dbConn.Exec(stmt); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	mustRun(t, env, "", "use", "term", "1")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "40")
+	mustRun(t, env, "", "use", "course", "2")
+	mustRun(t, env, "", "categories", "set-weight", "Exam", "60")
+
+	var count int
+	if err := dbConn.QueryRow(`SELECT COUNT(*) FROM category_schemes WHERE name LIKE 'Senior Fall%'`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("expected two distinct schemes, got %d (%v)", count, err)
+	}
+}
