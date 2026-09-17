@@ -915,6 +915,11 @@ func (a *App) saveGrade(assignmentID, studentID int, entry gradeEntry, prev *Gra
 		score.Float64/maxPoints < meta.PassPercent.Float64/100 {
 		entry.Flags |= flagRedo
 	}
+	if redoEligible && entry.Flags&flagPass != 0 && !entry.ClearRedo && entry.Flags&flagRedo == 0 &&
+		prev != nil && prev.Flags&(flagMissing|flagLocked0) == 0 && prev.Score.Valid && prev.MaxPoints > 0 &&
+		prev.Score.Float64/float64(prev.MaxPoints) < meta.PassPercent.Float64/100 {
+		entry.Flags |= flagRedo
+	}
 	_, err = a.db.Exec(`
 		INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask, redo_count)
 		VALUES (?, ?, ?, ?, ?)

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getMaterials, materialDownloadURL } from '../api';
 import { formatSize } from '../format';
+import { resolveCourse } from '../hooks/useCourseSelection';
 
 function FileRow({ course, categoryId, file }) {
   return (
@@ -34,7 +35,7 @@ function FileGroup({ course, categoryId, title, files }) {
   );
 }
 
-export function Materials() {
+export function Materials({ selectedCourseKey }) {
   const [courses, setCourses] = useState(null);
   const [error, setError] = useState(null);
 
@@ -69,36 +70,33 @@ export function Materials() {
     );
   }
 
+  const course = resolveCourse(courses, selectedCourseKey);
+
   return (
     <div className="space-y-6">
-      {courses.map((course) => (
-        <div
-          key={`${course.courseYearId}-${course.termId}`}
-          className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden"
-        >
-          <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-800">{course.courseName}</h2>
-            <div className="text-sm text-gray-500">
-              {course.courseYearName ? `${course.courseYearName} · ` : ''}{course.termName}
-            </div>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100">
+          <h2 className="font-semibold text-gray-800">{course.courseName}</h2>
+          <div className="text-sm text-gray-500">
+            {course.courseYearName ? `${course.courseYearName} · ` : ''}{course.termName}
           </div>
-          <FileGroup
-            course={course}
-            categoryId=""
-            title={course.categories?.length > 0 ? 'General' : null}
-            files={course.files}
-          />
-          {(course.categories || []).map((category) => (
-            <FileGroup
-              key={category.id}
-              course={course}
-              categoryId={category.id}
-              title={category.name}
-              files={category.files}
-            />
-          ))}
         </div>
-      ))}
+        <FileGroup
+          course={course}
+          categoryId=""
+          title={course.categories?.length > 0 ? 'General' : null}
+          files={course.files}
+        />
+        {(course.categories || []).map((category) => (
+          <FileGroup
+            key={category.id}
+            course={course}
+            categoryId={category.id}
+            title={category.name}
+            files={category.files}
+          />
+        ))}
+      </div>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
+import { courseKey, readStoredCourseKey, writeStoredCourseKey } from './hooks/useCourseSelection';
 import { getGrades } from './api';
 import { Layout } from './components/Layout';
 import { LoginForm } from './components/LoginForm';
@@ -16,25 +17,37 @@ import { AdminAssignmentDetail } from './components/AdminAssignmentDetail';
 import { AdminActivity } from './components/AdminActivity';
 import { Materials } from './components/Materials';
 import { Submissions } from './components/Submissions';
+import { UpcomingAssignments } from './components/UpcomingAssignments';
 
 function App() {
   const { user, loading, error, login, logout, checkAuth } = useAuth();
   const [gradesData, setGradesData] = useState(null);
-  const [selectedCourseIdx, setSelectedCourseIdx] = useState(0);
+  const [selectedCourseKey, setSelectedCourseKey] = useState(readStoredCourseKey);
   // The same SPA serves both subdomains; on the materials host, land on /materials.
   const isMaterialsHost = window.location.hostname.startsWith('materials.');
 
+  const selectCourse = (key) => {
+    setSelectedCourseKey(key);
+    writeStoredCourseKey(key);
+  };
+
+  const courses = gradesData?.courses || [];
+  const matchedIdx = courses.findIndex((c) => courseKey(c) === selectedCourseKey);
+  const selectedCourseIdx = matchedIdx >= 0 ? matchedIdx : mostRecentCourseIdx(courses);
+  const headerCourseKey = courses.length > 0 ? courseKey(courses[selectedCourseIdx]) : '';
+
+  // Drop stale grades when the signed-in user changes (login or logout): a
+  // state adjustment during render, kept out of the effect below.
+  const [prevUser, setPrevUser] = useState(user);
+  if (prevUser !== user) {
+    setPrevUser(user);
+    setGradesData(null);
+  }
+
   useEffect(() => {
-    if (!user) {
-      setGradesData(null);
-      setSelectedCourseIdx(0);
-      return;
-    }
+    if (!user) return;
     getGrades()
-      .then((data) => {
-        setGradesData(data);
-        setSelectedCourseIdx(mostRecentCourseIdx(data?.courses));
-      })
+      .then((data) => setGradesData(data))
       .catch(() => setGradesData(null));
   }, [user]);
 
@@ -65,7 +78,13 @@ function App() {
             !user ? (
               <LoginForm onLogin={login} error={error} />
             ) : user.mustChangePassword ? (
-              <Layout user={user} onLogout={logout}>
+              <Layout
+                user={user}
+                onLogout={logout}
+                courses={courses}
+                selectedCourseKey={headerCourseKey}
+                onSelectCourse={selectCourse}
+              >
                 <div className="max-w-md mx-auto space-y-4">
                   <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 px-3 py-2 rounded-lg">
                     Your password was reset by your teacher. Choose a new password to continue.
@@ -74,7 +93,13 @@ function App() {
                 </div>
               </Layout>
             ) : (
-              <Layout user={user} onLogout={logout}>
+              <Layout
+                user={user}
+                onLogout={logout}
+                courses={courses}
+                selectedCourseKey={headerCourseKey}
+                onSelectCourse={selectCourse}
+              >
                 <Routes>
                   <Route
                     path="/"
@@ -85,20 +110,19 @@ function App() {
                         <StudentHome
                           gradesData={gradesData}
                           selectedCourseIdx={selectedCourseIdx}
-                          onSelectCourse={setSelectedCourseIdx}
+                          selectedCourseKey={headerCourseKey}
                         />
                       )
                     }
                   />
-                  <Route path="/materials" element={<Materials />} />
-                  <Route path="/submissions" element={<Submissions />} />
+                  <Route path="/materials" element={<Materials selectedCourseKey={selectedCourseKey} />} />
+                  <Route path="/submissions" element={<Submissions selectedCourseKey={selectedCourseKey} />} />
                   <Route
                     path="/what-if"
                     element={
                       <WhatIfStudioWrapper
                         gradesData={gradesData}
                         selectedCourseIdx={selectedCourseIdx}
-                        onSelectCourse={setSelectedCourseIdx}
                       />
                     }
                   />
@@ -128,7 +152,7 @@ function mostRecentCourseIdx(courses) {
   return best;
 }
 
-function StudentHome({ gradesData, selectedCourseIdx, onSelectCourse }) {
+function StudentHome({ gradesData, selectedCourseIdx, selectedCourseKey }) {
   if (!gradesData) {
     return (
       <div className="text-center py-20">
@@ -150,17 +174,14 @@ function StudentHome({ gradesData, selectedCourseIdx, onSelectCourse }) {
 
   return (
     <div className="space-y-6">
-      <CourseSelector
-        courses={courses}
-        selectedIdx={selectedCourseIdx}
-        onSelect={onSelectCourse}
-      />
-      <GradeOverview grades={selected.snapshot} />
+      <GradeOverview grades={selected.snapshot}>
+        <UpcomingAssignments selectedCourseKey={selectedCourseKey} />
+      </GradeOverview>
     </div>
   );
 }
 
-function WhatIfStudioWrapper({ gradesData, selectedCourseIdx, onSelectCourse }) {
+function WhatIfStudioWrapper({ gradesData, selectedCourseIdx }) {
   if (!gradesData) {
     return (
       <div className="text-center py-20">
@@ -182,36 +203,10 @@ function WhatIfStudioWrapper({ gradesData, selectedCourseIdx, onSelectCourse }) 
 
   return (
     <div className="space-y-6">
-      <CourseSelector
-        courses={courses}
-        selectedIdx={selectedCourseIdx}
-        onSelect={onSelectCourse}
-      />
       <WhatIfStudio
         key={`${selected.courseYearId}-${selected.termId}`}
         grades={selected.snapshot}
       />
-    </div>
-  );
-}
-
-function CourseSelector({ courses, selectedIdx, onSelect }) {
-  if (courses.length <= 1) return null;
-
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
-      <label className="block text-sm font-medium text-gray-700 mb-2">Course / Year</label>
-      <select
-        value={selectedIdx}
-        onChange={(e) => onSelect(parseInt(e.target.value, 10))}
-        className="w-full sm:w-auto px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-      >
-        {courses.map((c, idx) => (
-          <option key={`${c.courseYearId}-${c.termId}`} value={idx}>
-            {c.courseName}{c.courseYearName ? ` · ${c.courseYearName}` : ''} · {c.termName}
-          </option>
-        ))}
-      </select>
     </div>
   );
 }

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { adminActivity } from '../api';
+import { useNavigate } from 'react-router-dom';
+import { adminActivity, adminListCourses } from '../api';
+import { useCourseSelection } from '../hooks/useCourseSelection';
+import { AdminNav } from './AdminNav';
 
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 const REFRESH_MS = 30 * 1000;
@@ -40,6 +42,8 @@ function lastSeenLabel(acc) {
 
 export function AdminActivity() {
   const [data, setData] = useState(null);
+  const [courses, setCourses] = useState(null);
+  const { selectedKey, setSelectedKey } = useCourseSelection(courses);
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -72,6 +76,12 @@ export function AdminActivity() {
     return () => clearInterval(timer);
   }, [navigate, load]);
 
+  useEffect(() => {
+    adminListCourses()
+      .then((d) => setCourses(d?.courses || []))
+      .catch(() => {});
+  }, []);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -96,40 +106,16 @@ export function AdminActivity() {
   const online = accounts.filter(
     (a) => a.lastSeenAt && now - new Date(a.lastSeenAt).getTime() < ONLINE_WINDOW_MS,
   );
-  const byLeastRecent = [...accounts].sort((a, b) => {
+  const byMostRecent = [...accounts].sort((a, b) => {
     if (!a.lastSeenAt && !b.lastSeenAt) return a.username.localeCompare(b.username);
-    if (!a.lastSeenAt) return -1;
-    if (!b.lastSeenAt) return 1;
-    return new Date(a.lastSeenAt) - new Date(b.lastSeenAt);
+    if (!a.lastSeenAt) return 1;
+    if (!b.lastSeenAt) return -1;
+    return new Date(b.lastSeenAt) - new Date(a.lastSeenAt);
   });
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <Link to="/admin" className="font-semibold text-gray-800 hover:text-gray-900">
-              Grades Admin
-            </Link>
-            <Link to="/admin/materials" className="text-sm text-gray-600 hover:text-gray-900">
-              Materials
-            </Link>
-            <Link to="/admin/submissions" className="text-sm text-gray-600 hover:text-gray-900">
-              Submissions
-            </Link>
-            <span className="text-sm font-medium text-gray-900">Activity</span>
-          </div>
-          <button
-            onClick={() => {
-              sessionStorage.removeItem('adminToken');
-              navigate('/admin/login');
-            }}
-            className="text-red-600 hover:text-red-700 font-medium text-sm"
-          >
-            Sign Out
-          </button>
-        </div>
-      </nav>
+      <AdminNav courses={courses} selectedKey={selectedKey} onSelectCourse={setSelectedKey} />
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
         {/* Online now */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
@@ -200,7 +186,7 @@ export function AdminActivity() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <tbody className="divide-y divide-gray-100">
-                {byLeastRecent.map((a) => (
+                {byMostRecent.map((a) => (
                   <tr key={a.username}>
                     <td className="px-6 py-2.5 font-medium text-gray-900">{a.username}</td>
                     <td className="px-6 py-2.5 text-right">

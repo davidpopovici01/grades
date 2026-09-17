@@ -1,21 +1,19 @@
-import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { adminListCourses } from '../api';
+import { useCourseSelection } from '../hooks/useCourseSelection';
+import { AdminNav } from './AdminNav';
+import { AdminCourseDetail } from './AdminCourseView';
 
 export function AdminDashboard() {
   const [courses, setCourses] = useState(null);
+  const { selectedKey, selected, setSelectedKey } = useCourseSelection(courses);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    const token = sessionStorage.getItem('adminToken');
-    if (!token) {
-      navigate('/admin/login');
-      return;
-    }
-
-    adminListCourses()
+  const loadCourses = useCallback(() => {
+    return adminListCourses()
       .then((data) => setCourses(data?.courses || []))
       .catch((err) => {
         if (err.status === 401) {
@@ -28,86 +26,44 @@ export function AdminDashboard() {
       .finally(() => setLoading(false));
   }, [navigate]);
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-gray-500">Loading...</div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-        <div className="text-center">
-          <div className="text-red-600 mb-2">Failed to load courses</div>
-          <div className="text-sm text-gray-500">{error}</div>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const token = sessionStorage.getItem('adminToken');
+    if (!token) {
+      navigate('/admin/login');
+      return;
+    }
+    loadCourses();
+  }, [navigate, loadCourses]);
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <span className="font-semibold text-gray-800">Grades Admin</span>
-            <Link to="/admin/materials" className="text-sm text-gray-600 hover:text-gray-900">
-              Materials
-            </Link>
-            <Link to="/admin/submissions" className="text-sm text-gray-600 hover:text-gray-900">
-              Submissions
-            </Link>
-            <Link to="/admin/activity" className="text-sm text-gray-600 hover:text-gray-900">
-              Activity
-            </Link>
+      <AdminNav courses={courses} selectedKey={selectedKey} onSelectCourse={setSelectedKey} wide />
+      {loading ? (
+        <main className="max-w-6xl mx-auto px-4 py-6">
+          <div className="text-center py-20 text-gray-500">Loading...</div>
+        </main>
+      ) : error ? (
+        <main className="max-w-6xl mx-auto px-4 py-6">
+          <div className="text-center py-20">
+            <div className="text-red-600 mb-2">Failed to load courses</div>
+            <div className="text-sm text-gray-500">{error}</div>
           </div>
-          <button
-            onClick={() => {
-              sessionStorage.removeItem('adminToken');
-              navigate('/admin/login');
-            }}
-            className="text-red-600 hover:text-red-700 font-medium text-sm"
-          >
-            Sign Out
-          </button>
-        </div>
-      </nav>
-      <main className="max-w-5xl mx-auto px-4 py-6">
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-800">Published Courses</h2>
-          </div>
-          {courses.length === 0 ? (
-            <div className="px-6 py-12 text-center text-gray-500">No published courses yet.</div>
-          ) : (
-            <div className="divide-y divide-gray-100">
-              {courses.map((course) => (
-                <Link
-                  key={`${course.courseYearId}-${course.termId}`}
-                  to={`/admin/courses/${course.courseYearId}/${course.termId}`}
-                  className="block px-6 py-4 hover:bg-gray-50 transition"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="font-medium text-gray-900">
-                        {course.courseName}
-                      </div>
-                      <div className="text-sm text-gray-500">
-                        {course.courseYearName ? `${course.courseYearName} · ` : ''}{course.termName}
-                      </div>
-                    </div>
-                    <div className="text-sm text-gray-400">
-                      Published {new Date(course.publishedAt).toLocaleString()}
-                    </div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          )}
-        </div>
-      </main>
+        </main>
+      ) : !selected ? (
+        <main className="max-w-6xl mx-auto px-4 py-6">
+          <div className="text-center py-20 text-gray-500">No published courses yet.</div>
+        </main>
+      ) : (
+        <AdminCourseDetail
+          key={selectedKey}
+          courseYearId={selected.courseYearId}
+          termId={selected.termId}
+          onUnpublished={() => {
+            setLoading(true);
+            loadCourses();
+          }}
+        />
+      )}
     </div>
   );
 }

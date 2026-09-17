@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 
 function formatPercent(value) {
   if (value === null || value === undefined || isNaN(value)) return '—';
@@ -134,16 +134,14 @@ function computeWeightedTotal(categories) {
 
 export function WhatIfStudio({ grades }) {
   const [scenarios, setScenarios] = useState([]);
-  const [selectedCategory, setSelectedCategory] = useState('');
+  // Default to the first category. WhatIfStudio mounts with grades already
+  // loaded and remounts per course (key prop), so an initializer suffices.
+  const [selectedCategory, setSelectedCategory] = useState(() =>
+    grades?.categories?.length > 0 ? String(grades.categories[0].categoryId) : ''
+  );
   const [scenarioTitle, setScenarioTitle] = useState('');
   const [scenarioMax, setScenarioMax] = useState('');
   const [scenarioScore, setScenarioScore] = useState('');
-
-  useEffect(() => {
-    if (grades?.categories?.length > 0) {
-      setSelectedCategory(String(grades.categories[0].categoryId));
-    }
-  }, [grades]);
 
   const projectedCategories = useMemo(() => {
     if (!grades) return [];

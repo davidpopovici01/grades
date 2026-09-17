@@ -138,6 +138,8 @@ For `import`, the CSV columns are `category`, `weight`, `scheme`, `pass_rate`, `
 
 ## Assignments
 
+The `assignments` command can also be run as `grades a`.
+
 ```powershell
 grades assignments add
 grades assignments list

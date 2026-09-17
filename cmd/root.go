@@ -570,8 +570,9 @@ func newCategoriesCmd(a *app.App) *cobra.Command {
 
 func newAssignmentsCmd(a *app.App) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:  "assignments",
-		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+		Use:     "assignments",
+		Aliases: []string{"a"},
+		RunE:    func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 
 	cmd.AddCommand(&cobra.Command{

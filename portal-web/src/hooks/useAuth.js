@@ -23,7 +23,9 @@ export function useAuth() {
   }, []);
 
   useEffect(() => {
-    checkAuth();
+    // Deferred to a microtask so the auth state updates happen outside the
+    // effect body (react-hooks/set-state-in-effect).
+    Promise.resolve().then(checkAuth);
 
     const handleUnauthorized = () => {
       setUser(null);

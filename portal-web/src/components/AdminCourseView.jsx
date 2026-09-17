@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { adminListStudents, adminResetPassword, adminUnpublishCourse } from '../api';
+import { useNavigate, useParams } from 'react-router-dom';
+import { adminListCourses, adminListStudents, adminResetPassword, adminUnpublishCourse } from '../api';
+import { courseKey, useCourseSelection } from '../hooks/useCourseSelection';
+import { AdminNav } from './AdminNav';
 
 function formatPercent(value) {
   if (value === null || value === undefined || isNaN(value)) return '—';
@@ -45,8 +47,48 @@ function GradeCell({ cell }) {
   );
 }
 
+// AdminCourseView keeps the /admin/courses/:courseYearId/:termId deep-link
+// route working: it syncs the URL course into the shared selection and
+// renders the same detail the Overview page shows.
 export function AdminCourseView() {
   const { courseYearId, termId } = useParams();
+  const [courses, setCourses] = useState(null);
+  const { selectedKey, setSelectedKey } = useCourseSelection(
+    courses,
+    `${courseYearId}-${termId}`
+  );
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    adminListCourses()
+      .then((data) => setCourses(data?.courses || []))
+      .catch(() => {});
+  }, []);
+
+  const handleSelectCourse = (key) => {
+    const course = (courses || []).find((c) => courseKey(c) === key);
+    if (course) {
+      setSelectedKey(key);
+      navigate(`/admin/courses/${course.courseYearId}/${course.termId}`);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <AdminNav courses={courses} selectedKey={selectedKey} onSelectCourse={handleSelectCourse} wide />
+      <AdminCourseDetail
+        key={`${courseYearId}-${termId}`}
+        courseYearId={parseInt(courseYearId, 10)}
+        termId={parseInt(termId, 10)}
+      />
+    </div>
+  );
+}
+
+// AdminCourseDetail shows the grades and accounts tables for one course. It
+// is used by both the Overview page (selected via the header dropdown) and
+// the deep-link route above.
+export function AdminCourseDetail({ courseYearId, termId, onUnpublished }) {
   const [students, setStudents] = useState(null);
   const [assignments, setAssignments] = useState([]);
   const [courseInfo, setCourseInfo] = useState(null);
@@ -57,16 +99,13 @@ export function AdminCourseView() {
   const [unpublishing, setUnpublishing] = useState(false);
   const navigate = useNavigate();
 
-  const courseYearIdNum = parseInt(courseYearId, 10);
-  const termIdNum = parseInt(termId, 10);
-
   const load = useCallback(() => {
     const token = sessionStorage.getItem('adminToken');
     if (!token) {
       navigate('/admin/login');
       return Promise.resolve();
     }
-    return adminListStudents(courseYearIdNum, termIdNum)
+    return adminListStudents(courseYearId, termId)
       .then((data) => {
         setStudents(data.students || []);
         setAssignments(data.assignments || []);
@@ -85,7 +124,7 @@ export function AdminCourseView() {
         }
         setError(err.message);
       });
-  }, [courseYearIdNum, termIdNum, navigate]);
+  }, [courseYearId, termId, navigate]);
 
   useEffect(() => {
     load().finally(() => setLoading(false));
@@ -110,8 +149,12 @@ export function AdminCourseView() {
     if (!window.confirm('Unpublish this course? This removes it and all student snapshots from the portal.')) return;
     setUnpublishing(true);
     try {
-      await adminUnpublishCourse(courseYearIdNum, termIdNum);
-      navigate('/admin');
+      await adminUnpublishCourse(courseYearId, termId);
+      if (onUnpublished) {
+        onUnpublished();
+      } else {
+        navigate('/admin');
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -121,192 +164,169 @@ export function AdminCourseView() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-gray-500">Loading...</div>
-      </div>
+      <main className="max-w-6xl mx-auto px-4 py-6">
+        <div className="text-center py-20 text-gray-500">Loading...</div>
+      </main>
     );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-        <div className="text-center">
+      <main className="max-w-6xl mx-auto px-4 py-6">
+        <div className="text-center py-20">
           <div className="text-red-600 mb-2">Failed to load students</div>
           <div className="text-sm text-gray-500">{error}</div>
         </div>
-      </div>
+      </main>
     );
   }
 
+  // Show the most recent assignments on the left (the server sends oldest first).
+  const orderedAssignments = [...assignments].reverse();
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link to="/admin" className="font-semibold text-gray-800 hover:text-gray-900">
-              Grades Admin
-            </Link>
-            <span className="text-gray-400">/</span>
-            <span className="text-gray-600 text-sm">
-              {courseInfo?.courseName
-                ? `${courseInfo.courseName}${courseInfo.courseYearName ? ` · ${courseInfo.courseYearName}` : ''} · ${courseInfo.termName}`
-                : `Course ${courseYearId} · Term ${termId}`}
-            </span>
-          </div>
+    <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="text-sm text-gray-500">
+          {courseInfo?.publishedAt
+            ? `Grades published ${new Date(courseInfo.publishedAt).toLocaleString()} — if this looks old, run grades publish on your laptop.`
+            : ''}
+        </div>
+        <div className="flex items-center gap-3">
           <button
-            onClick={() => {
-              sessionStorage.removeItem('adminToken');
-              navigate('/admin/login');
-            }}
-            className="text-red-600 hover:text-red-700 font-medium text-sm"
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition"
           >
-            Sign Out
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
+          <button
+            onClick={handleUnpublish}
+            disabled={unpublishing}
+            className="text-red-600 hover:text-red-700 font-medium text-sm disabled:opacity-50"
+          >
+            {unpublishing ? 'Unpublishing...' : 'Unpublish Course'}
           </button>
         </div>
-      </nav>
-      <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-gray-500">
-            {courseInfo?.publishedAt
-              ? `Grades published ${new Date(courseInfo.publishedAt).toLocaleString()} — if this looks old, run grades publish on your laptop.`
-              : ''}
+      </div>
+
+      {resetResult && (
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm">
+          <div className="font-medium text-green-900">Password reset for {resetResult.username}</div>
+          <div className="text-green-700 mt-1">
+            Temporary password: <code className="bg-white px-2 py-0.5 rounded border border-green-200">{resetResult.temporaryPassword}</code>
           </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition"
-            >
-              {refreshing ? 'Refreshing...' : 'Refresh'}
-            </button>
-            <button
-              onClick={handleUnpublish}
-              disabled={unpublishing}
-              className="text-red-600 hover:text-red-700 font-medium text-sm disabled:opacity-50"
-            >
-              {unpublishing ? 'Unpublishing...' : 'Unpublish Course'}
-            </button>
-          </div>
+          <button
+            onClick={() => setResetResult(null)}
+            className="mt-2 text-xs text-green-600 hover:text-green-800"
+          >
+            Dismiss
+          </button>
         </div>
+      )}
 
-        {resetResult && (
-          <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm">
-            <div className="font-medium text-green-900">Password reset for {resetResult.username}</div>
-            <div className="text-green-700 mt-1">
-              Temporary password: <code className="bg-white px-2 py-0.5 rounded border border-green-200">{resetResult.temporaryPassword}</code>
-            </div>
-            <button
-              onClick={() => setResetResult(null)}
-              className="mt-2 text-xs text-green-600 hover:text-green-800"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-800">Grades Overview</h2>
-          </div>
-          {students.length === 0 ? (
-            <div className="px-6 py-12 text-center text-gray-500">No students published in this course.</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="text-sm border-collapse">
-                <thead className="bg-gray-50 text-gray-600">
-                  <tr>
-                    <th className="text-left px-4 py-3 font-medium sticky left-0 bg-gray-50 min-w-40">Student</th>
-                    <th className="text-center px-3 py-3 font-medium">Total</th>
-                    {assignments.map((a) => (
-                      <th key={a.id} className="text-center px-3 py-3 font-medium min-w-24" title={`${a.title} (${a.categoryName}, ${a.maxPoints} pts)`}>
-                        <div className="max-w-28 truncate mx-auto">{a.title}</div>
-                      </th>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100">
+          <h2 className="font-semibold text-gray-800">Grades Overview</h2>
+        </div>
+        {students.length === 0 ? (
+          <div className="px-6 py-12 text-center text-gray-500">No students published in this course.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="text-sm border-collapse">
+              <thead className="bg-gray-50 text-gray-600">
+                <tr>
+                  <th className="text-left px-4 py-3 font-medium sticky left-0 bg-gray-50 min-w-40">Student</th>
+                  <th className="text-center px-3 py-3 font-medium">Total</th>
+                  {orderedAssignments.map((a) => (
+                    <th key={a.id} className="text-center px-3 py-3 font-medium min-w-24" title={`${a.title} (${a.categoryName}, ${a.maxPoints} pts)`}>
+                      <div className="max-w-28 truncate mx-auto">{a.title}</div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {students.map((student) => (
+                  <tr key={student.studentId}>
+                    <td className="px-4 py-2 sticky left-0 bg-white">
+                      <div className="font-medium text-gray-900 whitespace-nowrap">
+                        {student.firstName} {student.lastName}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                        {student.missing > 0 && (
+                          <span className="px-1 py-0.5 rounded bg-red-50 text-red-700 text-[10px] font-medium">
+                            {student.missing} missing
+                          </span>
+                        )}
+                        {student.redo > 0 && (
+                          <span className="px-1 py-0.5 rounded bg-orange-50 text-orange-700 text-[10px] font-medium">
+                            {student.redo} redo
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-center whitespace-nowrap">
+                      <span className="font-medium text-gray-900">{formatPercent(student.weightedTotal)}</span>
+                      {student.letterGrade && (
+                        <span className="ml-1 text-xs text-gray-500">({student.letterGrade})</span>
+                      )}
+                    </td>
+                    {orderedAssignments.map((a) => (
+                      <td key={a.id} className="px-3 py-2 text-center">
+                        <GradeCell cell={student.grades?.[a.id]} />
+                      </td>
                     ))}
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {students.map((student) => (
-                    <tr key={student.studentId}>
-                      <td className="px-4 py-2 sticky left-0 bg-white">
-                        <div className="font-medium text-gray-900 whitespace-nowrap">
-                          {student.firstName} {student.lastName}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                          {student.missing > 0 && (
-                            <span className="px-1 py-0.5 rounded bg-red-50 text-red-700 text-[10px] font-medium">
-                              {student.missing} missing
-                            </span>
-                          )}
-                          {student.redo > 0 && (
-                            <span className="px-1 py-0.5 rounded bg-orange-50 text-orange-700 text-[10px] font-medium">
-                              {student.redo} redo
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 text-center whitespace-nowrap">
-                        <span className="font-medium text-gray-900">{formatPercent(student.weightedTotal)}</span>
-                        {student.letterGrade && (
-                          <span className="ml-1 text-xs text-gray-500">({student.letterGrade})</span>
-                        )}
-                      </td>
-                      {assignments.map((a) => (
-                        <td key={a.id} className="px-3 py-2 text-center">
-                          <GradeCell cell={student.grades?.[a.id]} />
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-800">Accounts</h2>
+                ))}
+              </tbody>
+            </table>
           </div>
-          {students.length === 0 ? (
-            <div className="px-6 py-12 text-center text-gray-500">No students published in this course.</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 text-gray-600">
-                  <tr>
-                    <th className="text-left px-6 py-3 font-medium">Student</th>
-                    <th className="text-left px-6 py-3 font-medium">Username</th>
-                    <th className="text-right px-6 py-3 font-medium"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {students.map((student) => (
-                    <tr key={student.studentId}>
-                      <td className="px-6 py-3">
-                        <div className="font-medium text-gray-900">
-                          {student.firstName} {student.lastName}
-                        </div>
-                        {student.chineseName && (
-                          <div className="text-xs text-gray-400">{student.chineseName}</div>
-                        )}
-                      </td>
-                      <td className="px-6 py-3 text-gray-600">{student.username || '—'}</td>
-                      <td className="px-6 py-3 text-right">
-                        <button
-                          onClick={() => handleResetPassword(student)}
-                          className="text-blue-600 hover:text-blue-700 text-sm font-medium"
-                        >
-                          Reset Password
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+        )}
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100">
+          <h2 className="font-semibold text-gray-800">Accounts</h2>
         </div>
-      </main>
-    </div>
+        {students.length === 0 ? (
+          <div className="px-6 py-12 text-center text-gray-500">No students published in this course.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-gray-600">
+                <tr>
+                  <th className="text-left px-6 py-3 font-medium">Student</th>
+                  <th className="text-left px-6 py-3 font-medium">Username</th>
+                  <th className="text-right px-6 py-3 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {students.map((student) => (
+                  <tr key={student.studentId}>
+                    <td className="px-6 py-3">
+                      <div className="font-medium text-gray-900">
+                        {student.firstName} {student.lastName}
+                      </div>
+                      {student.chineseName && (
+                        <div className="text-xs text-gray-400">{student.chineseName}</div>
+                      )}
+                    </td>
+                    <td className="px-6 py-3 text-gray-600">{student.username || '—'}</td>
+                    <td className="px-6 py-3 text-right">
+                      <button
+                        onClick={() => handleResetPassword(student)}
+                        className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+                      >
+                        Reset Password
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </main>
   );
 }

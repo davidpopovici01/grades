@@ -420,6 +420,53 @@ func TestPublishCourseMigratesRenumberedAccount(t *testing.T) {
 	}
 }
 
+func TestPublishCoursePreservesServerPasswordAcrossPublishes(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "portal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	newer := time.Now().UTC()
+
+	localAccount := portalauth.Account{StudentID: 1, Username: "alice.brown", PasswordSalt: "local-salt", PasswordHash: "local-hash", PasswordChangedAt: old}
+	seed := &PublishRequest{
+		Accounts: []portalauth.Account{localAccount},
+		Course:   CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: newer.Format(time.RFC3339)},
+	}
+	if err := store.PublishCourse(seed); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+
+	// The student changes her password on the portal website.
+	if err := store.UpdateAccountPassword(1, "alice.brown", "vps-salt", "vps-hash", false, newer); err != nil {
+		t.Fatalf("website password change: %v", err)
+	}
+
+	// Every later publish still carries the old local password; the newer
+	// website-side password must survive each one, not just the first.
+	for i := 0; i < 2; i++ {
+		republish := &PublishRequest{
+			Accounts: []portalauth.Account{localAccount},
+			Course:   CourseInfo{CourseYearID: 1, TermID: 1, CourseName: "Seed", TermName: "T1", PublishedAt: newer.Format(time.RFC3339)},
+		}
+		if err := store.PublishCourse(republish); err != nil {
+			t.Fatalf("republish %d: %v", i+1, err)
+		}
+		acc, err := store.GetAccountByStudentID(1)
+		if err != nil || acc == nil {
+			t.Fatalf("account missing after republish %d (acc=%+v, err=%v)", i+1, acc, err)
+		}
+		if acc.PasswordHash != "vps-hash" {
+			t.Fatalf("republish %d reset the website-side password: got hash %q", i+1, acc.PasswordHash)
+		}
+		if _, err := time.Parse(time.RFC3339, acc.PasswordChangedAt); err != nil {
+			t.Fatalf("republish %d stored an invalid password_changed_at %q", i+1, acc.PasswordChangedAt)
+		}
+	}
+}
+
 func TestPublishCourseRemovesStaleSnapshots(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "portal.db"))
 	if err != nil {

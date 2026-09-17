@@ -57,41 +57,10 @@ export function ImprovementSummary({ grades }) {
     heading = 'On track';
   }
 
-  // Build actionable bullets
+  // Build actionable bullets. Missing/redo/late assignments are listed
+  // row-by-row in the ActionItems table right below, so this summary only
+  // adds guidance the table doesn't already show.
   const bullets = [];
-
-  if (missing.length > 0) {
-    const first = missing[0];
-    bullets.push(
-      <span key="missing">
-        You have <strong>{missing.length} missing assignment{missing.length > 1 ? 's' : ''}</strong>.
-        {missing.length === 1
-          ? ` Start with "${first.title}" in ${first.categoryName}.`
-          : ' Start with the most recent one to catch up quickly.'}
-      </span>
-    );
-  }
-
-  if (redo.length > 0) {
-    const first = redo[0];
-    bullets.push(
-      <span key="redo">
-        You have <strong>{redo.length} assignment{redo.length > 1 ? 's' : ''} to redo</strong>.
-        {redo.length === 1
-          ? ` Resubmit "${first.title}" to improve your ${first.categoryName} score.`
-          : ' Resubmit them to boost your category scores.'}
-      </span>
-    );
-  }
-
-  if (late.length > 0 && missing.length === 0) {
-    bullets.push(
-      <span key="late">
-        You have <strong>{late.length} late assignment{late.length > 1 ? 's' : ''}</strong>.
-        Late work still counts — make sure everything is submitted.
-      </span>
-    );
-  }
 
   if (lowestCategory && lowestCategory.score < 70 && missing.length === 0 && redo.length === 0) {
     bullets.push(
@@ -102,9 +71,15 @@ export function ImprovementSummary({ grades }) {
     );
   }
 
-  // Fallback positive message
+  // Fallback message
   if (bullets.length === 0) {
-    if (total >= 85) {
+    if (missing.length + redo.length + late.length > 0) {
+      bullets.push(
+        <span key="actions">
+          See the action items below to get back on track.
+        </span>
+      );
+    } else if (total >= 85) {
       bullets.push(
         <span key="great">
           Great work! Your grade is <strong>{formatPercent(total)}</strong>. Keep maintaining your strong

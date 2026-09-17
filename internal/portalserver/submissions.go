@@ -1,10 +1,12 @@
 package portalserver
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -115,11 +117,13 @@ type expectedSlot struct {
 // key identifies the slot in URLs and lookups: the first alternative.
 func (s expectedSlot) key() string { return s.names[0] }
 
-// match reports whether name is one of the slot's alternatives
-// (case-insensitive), returning the alternative's canonical spelling.
+// match reports whether name is exactly one of the slot's alternatives,
+// returning the alternative's canonical spelling. Case must match: a Java
+// file renamed to the canonical spelling would no longer match the class
+// name the student wrote, so mis-cased names are rejected instead.
 func (s expectedSlot) match(name string) (string, bool) {
 	for _, n := range s.names {
-		if strings.EqualFold(n, name) {
+		if n == name {
 			return n, true
 		}
 	}
@@ -1022,6 +1026,147 @@ func (s *Server) handleAdminSubSubmissionFile(w http.ResponseWriter, r *http.Req
 	http.ServeFile(w, r, path)
 }
 
+// handleAdminSubAssignmentDownload streams a zip of every enrolled student's
+// latest submission, one folder per student.
+func (s *Server) handleAdminSubAssignmentDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	a := s.adminAssignment(w, r)
+	if a == nil {
+		return
+	}
+	roster, err := s.store.ListStudentsForCourse(a.CourseYearID, a.TermID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list students"})
+		return
+	}
+	latest, err := s.store.LatestSubmissionsByAssignment(a.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list submissions"})
+		return
+	}
+
+	zipName := zipSafeName(a.Title)
+	if zipName == "" {
+		zipName = fmt.Sprintf("assignment-%d", a.ID)
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", zipName+"-submissions.zip"))
+
+	zw := zip.NewWriter(w)
+	usedFolders := map[string]bool{}
+	for _, st := range roster {
+		sub := latest[st.StudentID]
+		if sub == nil {
+			continue
+		}
+		folder := zipSafeName(strings.TrimSpace(st.FirstName + " " + st.LastName))
+		if folder == "" {
+			folder = st.Username
+		}
+		if folder == "" {
+			folder = fmt.Sprintf("student_%d", st.StudentID)
+		}
+		if usedFolders[folder] {
+			folder = fmt.Sprintf("%s_%s", folder, st.Username)
+		}
+		usedFolders[folder] = true
+
+		files, err := s.store.ListSubFiles(sub.ID)
+		if err != nil {
+			log.Printf("submissions download: list files for submission %d: %v", sub.ID, err)
+			continue
+		}
+		dir := submissionDir(s.config.SubmissionsDir, sub.AssignmentID, sub.StudentPK, sub.Attempt)
+		for _, f := range files {
+			path := filepath.Join(dir, f.Filename)
+			src, err := os.Open(path)
+			if err != nil {
+				log.Printf("submissions download: open %s: %v", path, err)
+				continue
+			}
+			dst, err := zw.Create(folder + "/" + f.Filename)
+			if err == nil {
+				_, err = io.Copy(dst, src)
+			}
+			src.Close()
+			if err != nil {
+				log.Printf("submissions download: zip %s: %v", f.Filename, err)
+			}
+		}
+	}
+	if err := zw.Close(); err != nil {
+		log.Printf("submissions download: close zip: %v", err)
+	}
+}
+
+// zipSafeName turns a display string into a safe zip entry / file name,
+// replacing path separators and control characters with underscores.
+func zipSafeName(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '/' || r == '\\' || r < 32:
+			return '_'
+		}
+		return r
+	}, strings.TrimSpace(name))
+}
+
+// handleStudentSubmissionFile serves one recorded file of the student's own
+// submission.
+func (s *Server) handleStudentSubmissionFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	claims, err := s.readToken(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid submission id"})
+		return
+	}
+	sub, err := s.store.GetSubSubmission(id)
+	if err != nil || sub == nil || sub.StudentPK != claims.StudentID {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "submission not found"})
+		return
+	}
+	name, err := sanitizeFilename(r.PathValue("name"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	files, err := s.store.ListSubFiles(sub.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list files"})
+		return
+	}
+	recorded := false
+	for _, f := range files {
+		if f.Filename == name {
+			recorded = true
+			break
+		}
+	}
+	if !recorded {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	path := filepath.Join(submissionDir(s.config.SubmissionsDir, sub.AssignmentID, sub.StudentPK, sub.Attempt), name)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	http.ServeFile(w, r, path)
+}
+
 // handleAdminSubPlagiarism queues (POST) or reports (GET) a JPlag run.
 func (s *Server) handleAdminSubPlagiarism(w http.ResponseWriter, r *http.Request) {
 	a := s.adminAssignment(w, r)
@@ -1557,8 +1702,8 @@ func (s *Server) handleStudentSubmissionSlot(w http.ResponseWriter, r *http.Requ
 }
 
 // handleSlotUpload stages one file into the draft. The picked file must match
-// one of the slot's alternatives (case-insensitive); it is stored under the
-// matched alternative's canonical spelling.
+// one of the slot's alternatives exactly (case-sensitive); it is stored under
+// the matched alternative's canonical spelling.
 func (s *Server) handleSlotUpload(w http.ResponseWriter, r *http.Request, a *SubAssignment, slot *expectedSlot, draft string, claims *PortalClaims) {
 	r.Body = http.MaxBytesReader(w, r.Body, a.MaxFileBytes+1<<20)
 	reader, err := r.MultipartReader()
@@ -1588,7 +1733,7 @@ func (s *Server) handleSlotUpload(w http.ResponseWriter, r *http.Request, a *Sub
 		}
 		matched, ok := slot.match(picked)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("file must be named %s (got %q)", strings.Join(slot.names, " or "), picked)})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("file must be named exactly %s (got %q) — names are case-sensitive, rename the file first", strings.Join(slot.names, " or "), picked)})
 			return
 		}
 		canonical = matched
@@ -1611,8 +1756,8 @@ func (s *Server) handleSlotUpload(w http.ResponseWriter, r *http.Request, a *Sub
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to stage file"})
 		return
 	}
-	// Remove any other alternative or case-variant of this slot so the draft
-	// holds exactly one file per slot (filesystems may be case-sensitive).
+	// Remove any other alternative of this slot so the draft holds exactly one
+	// file per slot.
 	if entries, err := os.ReadDir(draft); err == nil {
 		for _, e := range entries {
 			if e.IsDir() {
@@ -1813,8 +1958,8 @@ func (s *Server) handleStudentSubmissionSubmit(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"submission": subJSON})
 }
 
-// validateUploadSet requires exactly one file per expected slot,
-// case-insensitively matching any of the slot's alternatives.
+// validateUploadSet requires exactly one file per expected slot, matching any
+// of the slot's alternatives exactly (case-sensitive).
 func validateUploadSet(expected []string, files []uploadedFile) string {
 	slots := parseExpectedSlots(expected)
 	matched := make([]bool, len(slots))
@@ -1831,6 +1976,15 @@ func validateUploadSet(expected []string, files []uploadedFile) string {
 			}
 		}
 		if !ok {
+			// A case-only mismatch gets a targeted message so the student knows
+			// to rename the file rather than re-upload the same thing.
+			for _, slot := range slots {
+				for _, n := range slot.names {
+					if strings.EqualFold(n, f.name) {
+						return fmt.Sprintf("file %s must be named exactly %s (names are case-sensitive)", f.name, n)
+					}
+				}
+			}
 			return fmt.Sprintf("unexpected file %s", f.name)
 		}
 	}

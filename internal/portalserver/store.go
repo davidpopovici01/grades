@@ -384,11 +384,10 @@ func upsertAccount(db dbtx, acc portalauth.Account) error {
 	}
 
 	var existing portalauth.Account
-	var existingChangedAt string
 	err = db.QueryRow(`
 		SELECT student_pk, username, password_salt, password_hash, must_change_password, password_changed_at
 		FROM published_accounts WHERE student_pk = ?`, acc.StudentID).
-		Scan(&existing.StudentID, &existing.Username, &existing.PasswordSalt, &existing.PasswordHash, &existing.MustChangePassword, &existingChangedAt)
+		Scan(&existing.StudentID, &existing.Username, &existing.PasswordSalt, &existing.PasswordHash, &existing.MustChangePassword, &existing.PasswordChangedAt)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
@@ -398,7 +397,7 @@ func upsertAccount(db dbtx, acc portalauth.Account) error {
 	// row stored under this student_pk may belong to someone else.
 	keepAt := publishedAt
 	if err == nil && existing.Username == acc.Username {
-		existingAt, err := time.Parse(time.RFC3339, existingChangedAt)
+		existingAt, err := time.Parse(time.RFC3339, existing.PasswordChangedAt)
 		if err == nil && existingAt.After(keepAt) {
 			acc = existing
 			keepAt = existingAt
@@ -409,16 +408,15 @@ func upsertAccount(db dbtx, acc portalauth.Account) error {
 	// (local student IDs were renumbered). Adopt its password when newer,
 	// then remove it so the UNIQUE username constraint cannot collide.
 	var stale portalauth.Account
-	var staleChangedAt string
 	staleErr := db.QueryRow(`
 		SELECT student_pk, username, password_salt, password_hash, must_change_password, password_changed_at
 		FROM published_accounts WHERE username = ? AND student_pk != ?`, acc.Username, acc.StudentID).
-		Scan(&stale.StudentID, &stale.Username, &stale.PasswordSalt, &stale.PasswordHash, &stale.MustChangePassword, &staleChangedAt)
+		Scan(&stale.StudentID, &stale.Username, &stale.PasswordSalt, &stale.PasswordHash, &stale.MustChangePassword, &stale.PasswordChangedAt)
 	if staleErr != nil && staleErr != sql.ErrNoRows {
 		return staleErr
 	}
 	if staleErr == nil {
-		if staleAt, parseErr := time.Parse(time.RFC3339, staleChangedAt); parseErr == nil && staleAt.After(keepAt) {
+		if staleAt, parseErr := time.Parse(time.RFC3339, stale.PasswordChangedAt); parseErr == nil && staleAt.After(keepAt) {
 			incomingID := acc.StudentID
 			acc = stale
 			acc.StudentID = incomingID

@@ -14,23 +14,41 @@ function formatPercent(value) {
   return `${value.toFixed(1)}%`;
 }
 
-export function GradeOverview({ grades }) {
+// Mirrors the admin panel's pending logic (pendingAction in
+// internal/portalserver/handlers.go): missing/redo chips only show while they
+// still need action, and an unflagged failing score still gets a redo chip.
+function visibleFlags(a) {
+  const flags = a.flags || [];
+  const has = (f) => flags.includes(f);
+  const pendingMissing = has('missing');
+  let pendingRedo = false;
+  if (!pendingMissing && !has('cheat') && !has('pass') && a.passPercent > 0 && a.maxPoints > 0) {
+    const passing = a.score !== null && a.score !== undefined && (a.score / a.maxPoints) * 100 >= a.passPercent;
+    pendingRedo = has('redo') ? !passing : (a.score !== null && a.score !== undefined && !passing);
+  }
+  const display = flags.filter((f) => {
+    if (f === 'missing') return pendingMissing;
+    if (f === 'redo') return pendingRedo;
+    return true;
+  });
+  if (pendingRedo && !display.includes('redo')) display.push('redo');
+  return display;
+}
+
+export function GradeOverview({ grades, children }) {
   if (!grades) {
     return (
-      <div className="text-center py-20">
-        <div className="text-gray-500">No grades available for this course.</div>
+      <div className="space-y-6">
+        <div className="text-center py-20">
+          <div className="text-gray-500">No grades available for this course.</div>
+        </div>
+        {children}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {/* Improvement Summary */}
-      <ImprovementSummary grades={grades} />
-
-      {/* Action Items */}
-      <ActionItems grades={grades} />
-
       {/* Hero Card */}
       <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -59,6 +77,12 @@ export function GradeOverview({ grades }) {
 
       </div>
 
+      {/* Improvement Summary */}
+      <ImprovementSummary grades={grades} />
+
+      {/* Action Items */}
+      <ActionItems grades={grades} />
+
       {/* Category Totals */}
       {grades.categories?.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -80,7 +104,6 @@ export function GradeOverview({ grades }) {
                   <tr key={cat.categoryId} className={cat.included ? '' : 'text-gray-400'}>
                     <td className="px-6 py-3">
                       {cat.categoryName}
-                      <span className="text-xs text-gray-400 ml-2">({cat.schemeKey})</span>
                       {cat.dropLowest > 0 && (
                         <span className="text-xs text-gray-400 ml-2">drops lowest {cat.dropLowest}</span>
                       )}
@@ -109,6 +132,8 @@ export function GradeOverview({ grades }) {
           </div>
         </div>
       )}
+
+      {children}
 
       {/* Assignments */}
       {grades.assignments?.length > 0 && (
@@ -140,12 +165,11 @@ export function GradeOverview({ grades }) {
                           <span className="ml-2 text-xs font-normal text-gray-400">(before cutoff)</span>
                         )}
                       </div>
-                      <div className="text-xs text-gray-400">Max: {a.maxPoints} pts</div>
                     </td>
                     <td className="px-6 py-3 text-gray-600">{a.categoryName}</td>
                     <td className="px-6 py-3 text-right">
                       {a.score !== null && a.score !== undefined ? (
-                        <span className="font-medium">{a.score.toFixed(1)}</span>
+                        <span className="font-medium">{a.score}/{a.maxPoints}</span>
                       ) : (
                         <span className="text-gray-400">—</span>
                       )}
@@ -157,7 +181,7 @@ export function GradeOverview({ grades }) {
                     </td>
                     <td className="px-6 py-3">
                       <div className="flex flex-wrap gap-1">
-                        {a.flags?.map((flag) => (
+                        {visibleFlags(a).map((flag) => (
                           <span
                             key={flag}
                             className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${FLAG_COLORS[flag] || 'bg-gray-100 text-gray-700 border-gray-200'}`}

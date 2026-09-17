@@ -13,12 +13,14 @@ import {
   adminDeleteCategory,
 } from '../api';
 import { formatSize } from '../format';
+import { useCourseSelection } from '../hooks/useCourseSelection';
+import { AdminNav } from './AdminNav';
 
 const GENERAL = ''; // category id for uncategorized files
 
 export function AdminMaterials() {
   const [courses, setCourses] = useState(null);
-  const [selectedKey, setSelectedKey] = useState('');
+  const { selectedKey, selected, setSelectedKey } = useCourseSelection(courses);
   const [structure, setStructure] = useState({ files: [], categories: [] });
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -29,10 +31,6 @@ export function AdminMaterials() {
   const [uploadTarget, setUploadTarget] = useState(GENERAL);
   const fileInput = useRef(null);
   const navigate = useNavigate();
-
-  const selected = (courses || []).find(
-    (c) => `${c.courseYearId}-${c.termId}` === selectedKey
-  );
 
   const refresh = useCallback((course) => {
     return adminListMaterials(course.courseYearId, course.termId)
@@ -47,11 +45,7 @@ export function AdminMaterials() {
     }
     adminListCourses()
       .then((data) => {
-        const list = data?.courses || [];
-        setCourses(list);
-        if (list.length > 0) {
-          setSelectedKey(`${list[0].courseYearId}-${list[0].termId}`);
-        }
+        setCourses(data?.courses || []);
       })
       .catch((err) => {
         if (err.status === 401) {
@@ -142,44 +136,8 @@ export function AdminMaterials() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <span className="font-semibold text-gray-800">Grades Admin</span>
-            <button
-              onClick={() => navigate('/admin')}
-              className="text-sm text-gray-600 hover:text-gray-900"
-            >
-              Courses
-            </button>
-          </div>
-          <button
-            onClick={() => {
-              sessionStorage.removeItem('adminToken');
-              navigate('/admin/login');
-            }}
-            className="text-red-600 hover:text-red-700 font-medium text-sm"
-          >
-            Sign Out
-          </button>
-        </div>
-      </nav>
+      <AdminNav courses={courses} selectedKey={selectedKey} onSelectCourse={setSelectedKey} />
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-4">
-        <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Course</label>
-          <select
-            value={selectedKey}
-            onChange={(e) => setSelectedKey(e.target.value)}
-            className="w-full sm:w-auto px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            {courses.map((c) => (
-              <option key={`${c.courseYearId}-${c.termId}`} value={`${c.courseYearId}-${c.termId}`}>
-                {c.courseName}{c.courseYearName ? ` · ${c.courseYearName}` : ''} · {c.termName}
-              </option>
-            ))}
-          </select>
-        </div>
-
         {error && (
           <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded-lg">
             {error}

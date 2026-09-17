@@ -231,6 +231,36 @@ export const downloadSubmissionSlot = (assignmentId, name) =>
     URL.revokeObjectURL(url);
   });
 
+// getSubmissionFileText fetches a submitted file as text for inline viewing.
+export const getSubmissionFileText = (submissionId, name) =>
+  fetch(`${API_BASE}/submission-files/${submissionId}/${encodeURIComponent(name)}`, {
+    credentials: 'same-origin',
+  }).then(async (res) => {
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    return res.text();
+  });
+
+// downloadSubmissionFile downloads one file of a past submission attempt.
+export const downloadSubmissionFile = (submissionId, name) =>
+  fetch(`${API_BASE}/submission-files/${submissionId}/${encodeURIComponent(name)}`, {
+    credentials: 'same-origin',
+  }).then(async (res) => {
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
 // submitSubmission finalizes the staged draft into a submission attempt.
 export const submitSubmission = (assignmentId, confirmLate = false) =>
   apiFetch(`/submissions/${assignmentId}/submit${confirmLate ? '?confirmLate=true' : ''}`, { method: 'POST' });
@@ -394,6 +424,34 @@ export const adminGetSubmissionFileText = (submissionId, name) => {
       throw error;
     }
     return res.text();
+  });
+};
+
+// adminDownloadSubmissionsZip downloads every enrolled student's latest
+// submission for an assignment as one zip, one folder per student.
+export const adminDownloadSubmissionsZip = (assignmentId) => {
+  const token = sessionStorage.getItem('adminToken') || '';
+  return fetch(`${API_BASE}/admin/submissions/assignments/${assignmentId}/download`, {
+    credentials: 'same-origin',
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(async (res) => {
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      const error = new Error(data?.error || `HTTP ${res.status}`);
+      error.status = res.status;
+      throw error;
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = match ? match[1] : `submissions-assignment-${assignmentId}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   });
 };
 

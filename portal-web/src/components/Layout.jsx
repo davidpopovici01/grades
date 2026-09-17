@@ -1,4 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
+import { CourseSelect } from './CourseSelect';
 
 // portalHosts returns the canonical URLs of the two subdomains, or null on
 // unrecognized hosts (local dev, custom domains) so links stay same-origin.
@@ -13,7 +14,7 @@ function portalHosts() {
   return null;
 }
 
-export function Layout({ user, onLogout, children }) {
+export function Layout({ user, onLogout, courses, selectedCourseKey, onSelectCourse, children }) {
   const location = useLocation();
   const hosts = portalHosts();
   const onMaterialsHost = window.location.hostname.startsWith('materials.');
@@ -58,6 +59,7 @@ export function Layout({ user, onLogout, children }) {
               </div>
             </div>
             <div className="flex items-center gap-3 text-sm">
+              <CourseSelect courses={courses} value={selectedCourseKey} onChange={onSelectCourse} />
               <Link
                 to="/change-password"
                 className="text-gray-600 hover:text-gray-900"

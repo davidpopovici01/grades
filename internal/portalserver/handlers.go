@@ -454,11 +454,9 @@ func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	password, err := portalauth.RandomOrMemorablePassword(true)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not generate password"})
-		return
-	}
+	// The temporary password is the student's own username; must_change_password
+	// forces them to pick a real one at next login.
+	password := acc.Username
 
 	hash, salt, err := portalauth.HashPassword(password)
 	if err != nil {

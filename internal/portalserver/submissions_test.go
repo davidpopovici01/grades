@@ -1,9 +1,11 @@
 package portalserver
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -334,10 +336,10 @@ func TestValidateUploadSet(t *testing.T) {
 		wantErr string
 	}{
 		{"exact match", []string{"Main.java", "Helper.java"}, ""},
-		{"case-insensitive", []string{"main.JAVA", "helper.java"}, ""},
+		{"wrong case rejected", []string{"main.JAVA", "helper.java"}, "file main.JAVA must be named exactly Main.java (names are case-sensitive)"},
 		{"missing file", []string{"Main.java"}, "missing files: Helper.java"},
 		{"extra file", []string{"Main.java", "Helper.java", "Extra.java"}, "unexpected file Extra.java"},
-		{"duplicate file", []string{"Main.java", "main.java", "Helper.java"}, "unexpected file main.java"},
+		{"duplicate file", []string{"Main.java", "main.java", "Helper.java"}, "file main.java must be named exactly Main.java (names are case-sensitive)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -373,12 +375,21 @@ func TestSubmissionUploadValidation(t *testing.T) {
 		t.Fatalf("extra file: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Wrong case is accepted as a set match.
+	// Wrong case is rejected: students must rename the file exactly, otherwise
+	// Java files would be stored under a name that does not match the class.
 	rec = uploadSubmission(t, handler, cookies, assignmentID, map[string]string{
 		"MAIN.py": "print(1)", "Helper.py": "x = 1",
 	}, nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "case-sensitive") {
+		t.Fatalf("wrong-case upload should be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Exact names upload cleanly.
+	rec = uploadSubmission(t, handler, cookies, assignmentID, map[string]string{
+		"main.py": "print(1)", "helper.py": "x = 1",
+	}, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("case-insensitive upload: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("exact-name upload: %d %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		Submission struct {
@@ -1197,8 +1208,13 @@ func TestSlotUploadFlow(t *testing.T) {
 		t.Fatalf("mismatched file name: %d %s", rec.Code, rec.Body.String())
 	}
 
+	// A picked file matching only by case is rejected, not renamed.
+	if rec := uploadSlot(t, handler, cookies, assignmentID, "main.py", "MAIN.PY", "x", nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("case-variant file name: %d %s", rec.Code, rec.Body.String())
+	}
+
 	// First file stages a draft; no submission yet.
-	rec := uploadSlot(t, handler, cookies, assignmentID, "main.py", "MAIN.PY", "print('main')", nil)
+	rec := uploadSlot(t, handler, cookies, assignmentID, "main.py", "main.py", "print('main')", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first slot upload: %d %s", rec.Code, rec.Body.String())
 	}
@@ -1297,6 +1313,127 @@ func TestSlotUploadFlow(t *testing.T) {
 	rec = studentPost(t, handler, cookies, fmt.Sprintf("/api/submissions/%d/submit?confirmLate=true", lateID))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"isLate":true`) || !strings.Contains(rec.Body.String(), `"capPercent":90`) {
 		t.Fatalf("confirmed late: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestStudentSubmissionFileDownload covers the student endpoint for reading
+// back files of their own past submissions.
+func TestStudentSubmissionFileDownload(t *testing.T) {
+	server, handler, cookies := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, map[string]any{"expectedFilenames": "main.py"})
+
+	uploadSlot(t, handler, cookies, assignmentID, "main.py", "main.py", "print('hi')", nil)
+	rec := studentPost(t, handler, cookies, fmt.Sprintf("/api/submissions/%d/submit", assignmentID))
+	var subResp struct {
+		Submission struct {
+			ID int64 `json:"id"`
+		} `json:"submission"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &subResp); err != nil || subResp.Submission.ID == 0 {
+		t.Fatalf("submit: %d %s", rec.Code, rec.Body.String())
+	}
+	subID := subResp.Submission.ID
+
+	// The owner can download the recorded file.
+	rec = studentGet(t, handler, cookies, fmt.Sprintf("/api/submission-files/%d/main.py", subID))
+	if rec.Code != http.StatusOK || rec.Body.String() != "print('hi')" {
+		t.Fatalf("own file: %d %q", rec.Code, rec.Body.String())
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, "main.py") {
+		t.Fatalf("Content-Disposition: %q", cd)
+	}
+
+	// Another student gets 404, not the file.
+	jane := studentCookies(t, server, 2, "jane.doe")
+	if rec := studentGet(t, handler, jane, fmt.Sprintf("/api/submission-files/%d/main.py", subID)); rec.Code != http.StatusNotFound {
+		t.Fatalf("other student: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// No session → 401.
+	if rec := studentGet(t, handler, nil, fmt.Sprintf("/api/submission-files/%d/main.py", subID)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A file that exists on disk but is not recorded in sub_files is not served.
+	dir := submissionDir(server.config.SubmissionsDir, assignmentID, 1, 1)
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if rec := studentGet(t, handler, cookies, fmt.Sprintf("/api/submission-files/%d/notes.txt", subID)); rec.Code != http.StatusNotFound {
+		t.Fatalf("unrecorded file: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Path traversal is rejected before a file is served.
+	if rec := studentGet(t, handler, cookies, fmt.Sprintf("/api/submission-files/%d/..%%2Fmain.py", subID)); rec.Code == http.StatusOK {
+		t.Fatalf("traversal should not serve a file: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminSubAssignmentDownload covers the bulk zip download: latest attempt
+// per student, one folder per student, non-submitters skipped.
+func TestAdminSubAssignmentDownload(t *testing.T) {
+	server, handler, cookies := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, map[string]any{"expectedFilenames": "main.py"})
+
+	// John submits two attempts; only the latest should be zipped.
+	uploadSlot(t, handler, cookies, assignmentID, "main.py", "main.py", "print('old')", nil)
+	studentPost(t, handler, cookies, fmt.Sprintf("/api/submissions/%d/submit", assignmentID))
+	uploadSlot(t, handler, cookies, assignmentID, "main.py", "main.py", "print('new')", nil)
+	studentPost(t, handler, cookies, fmt.Sprintf("/api/submissions/%d/submit", assignmentID))
+
+	// Jane submits once; a third unpublished student never appears in the roster.
+	jane := studentCookies(t, server, 2, "jane.doe")
+	uploadSlot(t, handler, jane, assignmentID, "main.py", "main.py", "print('jane')", nil)
+	studentPost(t, handler, jane, fmt.Sprintf("/api/submissions/%d/submit", assignmentID))
+
+	rec := adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/download", assignmentID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download: %d %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
+		t.Fatalf("Content-Type: %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, "HW1-submissions.zip") {
+		t.Fatalf("Content-Disposition: %q", cd)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	got := map[string]string{}
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[f.Name] = string(data)
+	}
+	want := map[string]string{
+		"John Doe/main.py": "print('new')",
+		"Jane Doe/main.py": "print('jane')",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("zip entries: got %v, want %v", got, want)
+	}
+	for name, content := range want {
+		if got[name] != content {
+			t.Fatalf("entry %q: got %q, want %q", name, got[name], content)
+		}
+	}
+
+	// Unknown assignment 404s; wrong method 405s.
+	if rec := adminRequest(t, handler, http.MethodGet, "/api/admin/submissions/assignments/999/download", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown assignment: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := adminRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/admin/submissions/assignments/%d/download", assignmentID), nil); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

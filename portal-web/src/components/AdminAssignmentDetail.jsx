@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   adminGetSubAssignment,
+  adminListCourses,
   adminUploadSubTest,
   adminDeleteSubTest,
   adminListSubAssignmentSubmissions,
@@ -23,10 +24,14 @@ import {
   adminRunPlagiarism,
   adminGetPlagiarism,
   adminDownloadPlagReport,
+  adminDownloadSubmissionsZip,
   adminCreateSession,
   adminGetSubQueue,
 } from '../api';
-import { formatSize } from '../format';
+import { formatSize, isViewable } from '../format';
+import { useCourseSelection } from '../hooks/useCourseSelection';
+import { AdminNav } from './AdminNav';
+import { TestRunStatus } from './TestRunStatus';
 
 function filenamesList(value) {
   if (Array.isArray(value)) return value;
@@ -52,23 +57,14 @@ function VisibilityBadge({ visibility }) {
   );
 }
 
-function RunStatus({ run }) {
-  if (run.status !== 'done') {
-    return <span className="text-xs text-gray-400">{run.status}</span>;
-  }
-  return (
-    <span className={`text-xs font-medium ${run.failed > 0 ? 'text-amber-700' : 'text-green-700'}`}>
-      {run.passed} / {run.passed + run.failed} tests passed
-    </span>
-  );
-}
-
 export function AdminAssignmentDetail() {
   const { id } = useParams();
   const assignmentId = parseInt(id, 10);
   const navigate = useNavigate();
 
   const [assignment, setAssignment] = useState(null);
+  const [courses, setCourses] = useState(null);
+  const { selectedKey, setSelectedKey } = useCourseSelection(courses);
   const [tests, setTests] = useState([]);
   const [students, setStudents] = useState(null);
   const [queue, setQueue] = useState(null);
@@ -97,6 +93,26 @@ export function AdminAssignmentDetail() {
   const [plagStarting, setPlagStarting] = useState(false);
   const [expanded, setExpanded] = useState({});
   const queueWasActive = useRef(false);
+  const expandedRef = useRef(expanded);
+  useEffect(() => {
+    expandedRef.current = expanded;
+  }, [expanded]);
+
+  // refreshExpanded re-fetches the given [studentId, detail] entries in place
+  // so an open row keeps showing live test-run states.
+  const refreshExpanded = useCallback((entries) => {
+    for (const [sid, detail] of entries) {
+      const subId = detail?.submission?.id;
+      if (!subId) continue;
+      adminGetSubmission(subId)
+        .then((data) =>
+          setExpanded((prev) =>
+            prev[sid] && prev[sid] !== 'loading' ? { ...prev, [sid]: data } : prev
+          )
+        )
+        .catch(() => {});
+    }
+  }, []);
 
   const handleAuthError = useCallback(
     (err) => {
@@ -163,6 +179,12 @@ export function AdminAssignmentDetail() {
     });
   }, [navigate, loadAssignment, loadStudents, loadPlagiarism, loadSample, loadBasecode, handleAuthError]);
 
+  useEffect(() => {
+    adminListCourses()
+      .then((data) => setCourses(data?.courses || []))
+      .catch(() => {});
+  }, []);
+
   // Poll the worker queue; while it is active, refresh the grid so running
   // spinners and finished results show up live.
   useEffect(() => {
@@ -178,6 +200,11 @@ export function AdminAssignmentDetail() {
           }
           if (queueWasActive.current && !active) {
             loadPlagiarism();
+            // Final refresh of any open submission details now that the
+            // queue has drained.
+            refreshExpanded(
+              Object.entries(expandedRef.current).filter(([, d]) => d && d !== 'loading')
+            );
           }
           queueWasActive.current = active;
         })
@@ -189,7 +216,21 @@ export function AdminAssignmentDetail() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [loadStudents, loadPlagiarism]);
+  }, [loadStudents, loadPlagiarism, refreshExpanded]);
+
+  // While an expanded submission detail has queued/running test runs, poll it
+  // every 3 s until all of its runs reach a terminal state.
+  useEffect(() => {
+    const active = Object.entries(expanded).filter(
+      ([, detail]) =>
+        detail &&
+        detail !== 'loading' &&
+        (detail.runs || []).some((r) => r.status === 'queued' || r.status === 'running')
+    );
+    if (active.length === 0) return undefined;
+    const timer = setInterval(() => refreshExpanded(active), 3000);
+    return () => clearInterval(timer);
+  }, [expanded, refreshExpanded]);
 
   // While a plagiarism run is queued/running, poll its status.
   const plagStatus = plag?.run?.status;
@@ -466,26 +507,12 @@ export function AdminAssignmentDetail() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link to="/admin/submissions" className="font-semibold text-gray-800 hover:text-gray-900">
-              Grades Admin
-            </Link>
-            <span className="text-gray-400">/</span>
-            <span className="text-gray-600 text-sm">{assignment.title}</span>
-          </div>
-          <button
-            onClick={() => {
-              sessionStorage.removeItem('adminToken');
-              navigate('/admin/login');
-            }}
-            className="text-red-600 hover:text-red-700 font-medium text-sm"
-          >
-            Sign Out
-          </button>
-        </div>
-      </nav>
+      <AdminNav
+        courses={courses}
+        selectedKey={selectedKey}
+        onSelectCourse={setSelectedKey}
+        crumb={assignment.title}
+      />
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-4">
         {error && (
           <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded-lg">
@@ -815,7 +842,7 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium text-gray-900">{run.testName}</span>
                       <VisibilityBadge visibility={run.visibility} />
-                      <RunStatus run={run} />
+                      <TestRunStatus run={run} />
                     </div>
                     {run.output && (
                       <pre className="mt-2 max-h-48 overflow-auto text-xs bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all font-mono text-gray-800">
@@ -844,6 +871,12 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                 className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"
               >
                 Refresh
+              </button>
+              <button
+                onClick={() => adminDownloadSubmissionsZip(assignmentId).catch((err) => setError(err.message))}
+                className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+              >
+                Download All (zip)
               </button>
               {(assignment.language === 'java' || assignment.language === 'python') && (
                 <button
@@ -1142,19 +1175,6 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
   );
 }
 
-// VIEWABLE_EXTENSIONS can be reviewed inline in the browser; everything else
-// (pdf, docx, xlsx, images, video…) stays download-only.
-const VIEWABLE_EXTENSIONS = new Set([
-  '.java', '.py', '.txt', '.md', '.csv', '.json', '.xml', '.html', '.css',
-  '.js', '.ts', '.c', '.h', '.cpp', '.hpp', '.cs', '.go', '.rs', '.sql',
-  '.yaml', '.yml', '.toml', '.ini', '.sh', '.log', '.tex',
-]);
-
-function isViewable(name) {
-  const dot = name.lastIndexOf('.');
-  return dot >= 0 && VIEWABLE_EXTENSIONS.has(name.slice(dot).toLowerCase());
-}
-
 function SubmissionDetail({ detail }) {
   const [downloadError, setDownloadError] = useState(null);
   const [viewing, setViewing] = useState({}); // name -> text content, true while loading
@@ -1244,7 +1264,7 @@ function SubmissionDetail({ detail }) {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm font-medium text-gray-900">{run.testName}</span>
                   <VisibilityBadge visibility={run.visibility} />
-                  <RunStatus run={run} />
+                  <TestRunStatus run={run} />
                   <span className="text-xs text-gray-400">
                     by {run.triggeredBy}
                     {run.finishedAt ? ` · ${new Date(run.finishedAt).toLocaleString()}` : ''}

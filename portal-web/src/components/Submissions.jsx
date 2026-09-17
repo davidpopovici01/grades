@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { getSubmissions, getSubmissionDetail, uploadSubmissionSlot, deleteSubmissionSlot, downloadSubmissionSlot, submitSubmission, runMyTests } from '../api';
-import { formatSize } from '../format';
+import { getSubmissions, getSubmissionDetail, uploadSubmissionSlot, deleteSubmissionSlot, downloadSubmissionSlot, submitSubmission, runMyTests, getSubmissionFileText, downloadSubmissionFile } from '../api';
+import { formatSize, isViewable } from '../format';
+import { resolveCourse } from '../hooks/useCourseSelection';
+import { TestRunStatus } from './TestRunStatus';
 
 const LANG_BADGE = {
   java: 'bg-blue-50 text-blue-700',
@@ -71,6 +73,7 @@ function AssignmentCard({ assignment }) {
   const [notice, setNotice] = useState(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [detail, setDetail] = useState(null);
+  const [viewing, setViewing] = useState({}); // "submissionId:name" -> text, true while loading
   const slotInputs = useRef({});
   const pollTimer = useRef(null);
 
@@ -96,6 +99,19 @@ function AssignmentCard({ assignment }) {
           : null;
       }
       if (data.draft) next.draftFiles = data.draft.files;
+      if (data.latestPublicRuns) {
+        // The detail response has no aggregate counts; derive them so the
+        // header badge refreshes while polling.
+        let passed = 0;
+        let failed = 0;
+        for (const run of data.latestPublicRuns) {
+          if (run.status !== 'done') continue;
+          passed += run.passed || 0;
+          failed += run.failed || 0;
+        }
+        next.publicPassed = passed;
+        next.publicFailed = failed;
+      }
       return next;
     });
     if (data.assignment) {
@@ -120,8 +136,8 @@ function AssignmentCard({ assignment }) {
     setNotice(null);
     setError(null);
     if (!file) return;
-    if (!names.some((n) => n.toLowerCase() === file.name.toLowerCase())) {
-      setSlotErrors((prev) => ({ ...prev, [name]: `File must be named ${names.join(' or ')} — rename it first.` }));
+    if (!names.some((n) => n === file.name)) {
+      setSlotErrors((prev) => ({ ...prev, [name]: `File must be named exactly ${names.join(' or ')} (upper/lowercase matters) — rename it first.` }));
       return;
     }
     if (summary.maxFileBytes > 0 && file.size > summary.maxFileBytes) {
@@ -152,7 +168,7 @@ function AssignmentCard({ assignment }) {
           missing.length > 0 && !summary.latestSubmission
             ? `${name} staged — still needed: ${missing.join(', ')}`
             : summary.latestSubmission
-              ? `${name} staged — press Submit to record a new version; other files are kept from your previous submission.`
+              ? `${name} staged — press Submit (or Submit and Test) to record a new version; other files are kept from your previous submission.`
               : `${name} staged — all files ready, press Submit to record your submission.`,
         );
         if (resp?.draft) {
@@ -184,6 +200,35 @@ function AssignmentCard({ assignment }) {
     downloadSubmissionSlot(summary.id, name).catch((err) => setError(err.message));
   };
 
+  const onFileDownload = (submissionId, name) => {
+    setError(null);
+    downloadSubmissionFile(submissionId, name).catch((err) => setError(err.message));
+  };
+
+  const toggleFileView = (submissionId, name) => {
+    const key = `${submissionId}:${name}`;
+    setError(null);
+    if (viewing[key]) {
+      setViewing((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      return;
+    }
+    setViewing((prev) => ({ ...prev, [key]: true }));
+    getSubmissionFileText(submissionId, name)
+      .then((text) => setViewing((prev) => ({ ...prev, [key]: text })))
+      .catch((err) => {
+        setViewing((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        setError(err.message);
+      });
+  };
+
   const onSubmit = (confirmLate = false) => {
     setSubmitting(true);
     setError(null);
@@ -213,7 +258,6 @@ function AssignmentCard({ assignment }) {
   };
 
   const pollForResults = () => {
-    const startedAt = Date.now();
     let attempts = 0;
     const tick = () => {
       attempts += 1;
@@ -221,15 +265,17 @@ function AssignmentCard({ assignment }) {
         .then((data) => {
           applyDetail(data);
           const runs = data?.latestPublicRuns || [];
-          const finished = runs.some((r) => r.finishedAt && Date.parse(r.finishedAt) >= startedAt);
-          if (finished || attempts >= 20) {
+          // The grader runs tests one at a time: keep polling until every
+          // queued/running run has reached a terminal state.
+          const active = runs.some((r) => r.status === 'queued' || r.status === 'running');
+          if ((runs.length > 0 && !active) || attempts >= 100) {
             setTesting(false);
             return;
           }
           pollTimer.current = setTimeout(tick, 3000);
         })
         .catch(() => {
-          if (attempts >= 20) {
+          if (attempts >= 100) {
             setTesting(false);
           } else {
             pollTimer.current = setTimeout(tick, 3000);
@@ -239,7 +285,7 @@ function AssignmentCard({ assignment }) {
     pollTimer.current = setTimeout(tick, 3000);
   };
 
-  const onTest = () => {
+  const queueTests = () => {
     setTesting(true);
     setError(null);
     setNotice(null);
@@ -259,6 +305,42 @@ function AssignmentCard({ assignment }) {
       });
   };
 
+  const onTest = () => {
+    queueTests();
+  };
+
+  // onSubmitAndTest records the staged draft first, then queues tests against
+  // the new submission — students pressing Test expect their staged files to be
+  // the ones tested.
+  const onSubmitAndTest = (confirmLate = false) => {
+    setSubmitting(true);
+    setError(null);
+    setNotice(null);
+    submitSubmission(summary.id, confirmLate)
+      .then(() => {
+        return refresh().then(() => {
+          queueTests();
+        });
+      })
+      .catch((err) => {
+        if (err.status === 409 && err.data?.late) {
+          const penalty = 100 - (summary.lateCapPercent ?? 90);
+          const due = err.data.dueAt ? ` (${new Date(err.data.dueAt).toLocaleString()})` : '';
+          if (window.confirm(`This submission is past the due date${due} — a ${penalty}% late penalty applies. Submit anyway?`)) {
+            return onSubmitAndTest(true);
+          }
+          return undefined;
+        }
+        if (err.status === 409 && err.data?.missing) {
+          setError(`Still missing: ${err.data.missing.join(', ')}`);
+          return undefined;
+        }
+        setError(err.message);
+        return undefined;
+      })
+      .finally(() => setSubmitting(false));
+  };
+
   const toggleHistory = () => {
     setHistoryOpen((prev) => !prev);
   };
@@ -269,6 +351,7 @@ function AssignmentCard({ assignment }) {
 
   const hasResults = (summary.publicPassed || 0) > 0 || (summary.publicFailed || 0) > 0;
   const hasTests = (summary.publicTestCount || 0) > 0;
+  const latestRuns = detail?.latestPublicRuns || [];
   const testDisabled = testing || cooldown > 0 || !summary.isOpen || !summary.latestSubmission;
 
   const draftFiles = detail?.draft?.files || summary.draftFiles || [];
@@ -281,6 +364,9 @@ function AssignmentCard({ assignment }) {
     (summary.expectedFilenames || []).every((n) => draftBySlot.has(n.toLowerCase()));
   const canSubmit = summary.isOpen && expectedCount > 0 && draftBySlot.size > 0 && allCovered;
   const stagedAny = draftBySlot.size > 0;
+  // With staged files forming a valid submission, Test becomes "Submit and Test"
+  // so the staged files are what actually gets tested.
+  const submitAndTest = hasTests && canSubmit;
 
   const slotState = (display) => {
     const entry = draftBySlot.get(display.toLowerCase());
@@ -443,14 +529,25 @@ function AssignmentCard({ assignment }) {
           </span>
         )}
         {hasTests && (
-          <button
-            onClick={onTest}
-            disabled={testDisabled}
-            title={!summary.latestSubmission ? 'Upload your files first' : ''}
-            className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
-          >
-            {testing ? 'Testing...' : cooldown > 0 ? `Test (${cooldown}s)` : 'Test'}
-          </button>
+          submitAndTest ? (
+            <button
+              onClick={() => onSubmitAndTest(false)}
+              disabled={submitting || testing || cooldown > 0 || slotBusy !== null}
+              title="Record the staged files as a new submission and run the public tests on it"
+              className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
+            >
+              {submitting ? 'Submitting...' : testing ? 'Testing...' : cooldown > 0 ? `Submit and Test (${cooldown}s)` : 'Submit and Test'}
+            </button>
+          ) : (
+            <button
+              onClick={onTest}
+              disabled={testDisabled}
+              title={!summary.latestSubmission ? 'Upload your files first' : ''}
+              className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
+            >
+              {testing ? 'Testing...' : cooldown > 0 ? `Test (${cooldown}s)` : 'Test'}
+            </button>
+          )
         )}
         <button
           onClick={toggleHistory}
@@ -460,71 +557,116 @@ function AssignmentCard({ assignment }) {
         </button>
       </div>
 
+      {hasTests && (
+        <div className="border border-gray-200 rounded-lg px-4 py-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Tests
+            </span>
+            {testing && (
+              <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
+                running
+              </span>
+            )}
+          </div>
+          {!detail ? (
+            <div className="text-sm text-gray-400">Loading...</div>
+          ) : latestRuns.length === 0 ? (
+            <div className="text-sm text-gray-400">
+              {canSubmit
+                ? 'Press Submit and Test to record your files and run the public tests.'
+                : summary.latestSubmission
+                  ? 'Not tested yet — press Test to run the public tests.'
+                  : 'Submit your files, then press Test to run the public tests.'}
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-100">
+                {latestRuns.map((run, idx) => (
+                  <div key={`${run.testName}-${idx}`} className="py-1.5 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-700">{run.testName}</span>
+                      <TestRunStatus run={run} />
+                    </div>
+                    {run.output && (
+                      <pre className="mt-1 max-h-48 overflow-auto text-xs bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all font-mono text-gray-800">
+                        {run.output}
+                      </pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {latestRuns.length < (summary.publicTestCount || 0) && (
+                <div className="text-xs text-gray-400">
+                  {latestRuns.length} of {summary.publicTestCount} tests have run
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {historyOpen && (
         <div className="border-t border-gray-100 pt-3 space-y-3">
           {!detail ? (
             <div className="text-sm text-gray-400">Loading...</div>
           ) : (
-            <>
-              {(detail.latestPublicRuns || []).length > 0 && (
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1">
-                    Latest public test results
-                  </div>
-                  <div className="divide-y divide-gray-100">
-                    {detail.latestPublicRuns.map((run, idx) => (
-                      <div key={`${run.testName}-${idx}`} className="py-1.5 text-sm">
-                        <div className="flex items-center justify-between">
-                          <span className="text-gray-700">{run.testName}</span>
-                          <span
-                            className={`text-xs font-medium ${
-                              run.status !== 'done'
-                                ? 'text-gray-400'
-                                : run.failed > 0
-                                  ? 'text-amber-700'
-                                  : 'text-green-700'
-                            }`}
-                          >
-                            {run.status !== 'done' ? run.status : `${run.passed} / ${run.passed + run.failed} tests passed`}
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1">
+                Attempts ({(detail.submissions || []).length})
+              </div>
+              {(detail.submissions || []).length === 0 ? (
+                <div className="text-sm text-gray-400">No submissions yet.</div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {(detail.submissions || []).map((s) => (
+                    <div key={s.id} className="py-1.5 text-sm">
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-700">{new Date(s.submittedAt).toLocaleString()}</span>
+                        {s.isLate && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-xs font-medium">
+                            late · capped at {s.capPercent}%
                           </span>
-                        </div>
-                        {run.output && (
-                          <pre className="mt-1 max-h-48 overflow-auto text-xs bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all font-mono text-gray-800">
-                            {run.output}
-                          </pre>
                         )}
                       </div>
-                    ))}
-                  </div>
+                      <div className="mt-1 space-y-1">
+                        {(s.files || []).map((f) => {
+                          const key = `${s.id}:${f.name}`;
+                          return (
+                            <div key={f.name}>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <code className="text-xs text-gray-700">{f.name}</code>
+                                <span className="text-xs text-gray-400">{formatSize(f.size)}</span>
+                                {isViewable(f.name) && (
+                                  <button
+                                    onClick={() => toggleFileView(s.id, f.name)}
+                                    className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                                  >
+                                    {viewing[key] ? 'Hide' : 'View'}
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => onFileDownload(s.id, f.name)}
+                                  className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                                >
+                                  Download
+                                </button>
+                              </div>
+                              {viewing[key] && (
+                                <pre className="mt-1 max-h-96 overflow-auto text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 whitespace-pre-wrap break-all font-mono text-gray-800">
+                                  {viewing[key] === true ? 'Loading...' : viewing[key]}
+                                </pre>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1">
-                  Attempts ({(detail.submissions || []).length})
-                </div>
-                {(detail.submissions || []).length === 0 ? (
-                  <div className="text-sm text-gray-400">No submissions yet.</div>
-                ) : (
-                  <div className="divide-y divide-gray-100">
-                    {detail.submissions.map((s) => (
-                      <div key={s.id} className="py-1.5 text-sm">
-                        <div className="flex items-center gap-2">
-                          <span className="text-gray-700">{new Date(s.submittedAt).toLocaleString()}</span>
-                          {s.isLate && (
-                            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-xs font-medium">
-                              late · capped at {s.capPercent}%
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-gray-400">
-                          {(s.files || []).map((f) => `${f.name} (${formatSize(f.size)})`).join(', ')}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </>
+            </div>
           )}
         </div>
       )}
@@ -532,7 +674,7 @@ function AssignmentCard({ assignment }) {
   );
 }
 
-export function Submissions() {
+export function Submissions({ selectedCourseKey }) {
   const [courses, setCourses] = useState(null);
   const [error, setError] = useState(null);
 
@@ -567,30 +709,27 @@ export function Submissions() {
     );
   }
 
+  const course = resolveCourse(courses, selectedCourseKey);
+
   return (
     <div className="space-y-6">
-      {courses.map((course) => (
-        <div
-          key={`${course.courseYearId}-${course.termId}`}
-          className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden"
-        >
-          <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-800">{course.courseName}</h2>
-            <div className="text-sm text-gray-500">
-              {course.courseYearName ? `${course.courseYearName} · ` : ''}{course.termName}
-            </div>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100">
+          <h2 className="font-semibold text-gray-800">{course.courseName}</h2>
+          <div className="text-sm text-gray-500">
+            {course.courseYearName ? `${course.courseYearName} · ` : ''}{course.termName}
           </div>
-          {(course.assignments || []).length === 0 ? (
-            <div className="px-6 py-4 text-sm text-gray-400">No assignments for this course.</div>
-          ) : (
-            <div className="divide-y divide-gray-100">
-              {course.assignments.map((assignment) => (
-                <AssignmentCard key={assignment.id} assignment={assignment} />
-              ))}
-            </div>
-          )}
         </div>
-      ))}
+        {(course.assignments || []).length === 0 ? (
+          <div className="px-6 py-4 text-sm text-gray-400">No assignments for this course.</div>
+        ) : (
+          <div className="divide-y divide-gray-100">
+            {course.assignments.map((assignment) => (
+              <AssignmentCard key={assignment.id} assignment={assignment} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
