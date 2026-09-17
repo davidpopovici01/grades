@@ -25,11 +25,16 @@ HEALTH_URL="${HEALTH_URL:-https://grades.mrpopovici.com/api/health}"
 cd "$(dirname "$0")/.."
 
 # rollback restores the previous binary and frontend assets, if any exist.
+# rollback restores the previous release. The .new staging artifacts double as
+# markers of how far activation got: if portal.new is still there, the swap
+# never happened and the live binary must not be touched; if it is gone and
+# no portal.prev exists, this was a first deploy and the partially activated
+# binary is removed instead.
 rollback() {
     echo "Rolling back to the previous release..."
     ssh "${SERVER}" "cd ${REMOTE_DIR} && \
-        if [ -f portal.prev ]; then mv portal.prev portal; fi && \
-        if [ -d static.prev ]; then rm -rf static && mv static.prev static; fi && \
+        if [ -f portal.prev ]; then mv portal.prev portal; elif [ ! -f portal.new ]; then rm -f portal; fi && \
+        if [ -d static.prev ]; then rm -rf static && mv static.prev static; elif [ ! -d static.new ]; then rm -rf static; fi && \
         sudo systemctl restart portal" || true
 }
 
