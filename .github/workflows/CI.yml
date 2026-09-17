@@ -111,6 +111,10 @@ jobs:
           cache: npm
           cache-dependency-path: portal-web/package-lock.json
 
+      - name: Install frontend dependencies
+        working-directory: portal-web
+        run: npm ci
+
       - name: Set up deploy SSH key
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
