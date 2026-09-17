@@ -7,9 +7,10 @@ set -e
 # write under /opt/portal and restart the service through the narrow sudoers
 # rule installed by scripts/server-setup.sh.
 #
-# The swap is atomic and self-healing: the new binary uploads as portal.new,
-# becomes portal with a single mv, and if the post-deploy health check fails
-# the previous binary is restored automatically.
+# The binary and the frontend assets switch as one release: both upload next
+# to the live versions and swap in a single step, keeping .prev copies. If the
+# restart fails or the post-deploy health check does not pass, both are
+# rolled back automatically.
 #
 # portal.service is only copied to /opt/portal as a reference; installing a
 # changed unit into /etc/systemd requires root and is a manual step (the
@@ -19,24 +20,40 @@ set -e
 
 SERVER="${SERVER:-portal@185.223.207.226}"
 REMOTE_DIR="/opt/portal"
-STATIC_DIR="${REMOTE_DIR}/static"
 HEALTH_URL="${HEALTH_URL:-https://grades.mrpopovici.com/api/health}"
 
 cd "$(dirname "$0")/.."
+
+# rollback restores the previous binary and frontend assets, if any exist.
+rollback() {
+    echo "Rolling back to the previous release..."
+    ssh "${SERVER}" "cd ${REMOTE_DIR} && \
+        if [ -f portal.prev ]; then mv portal.prev portal; fi && \
+        if [ -d static.prev ]; then rm -rf static && mv static.prev static; fi && \
+        sudo systemctl restart portal" || true
+}
 
 echo "Building..."
 ./scripts/build-portal.sh
 
 echo "Uploading to ${SERVER}..."
-rsync -avz --delete portal-web/dist/ "${SERVER}:${STATIC_DIR}/"
 rsync -avz dist/portal "${SERVER}:${REMOTE_DIR}/portal.new"
+rsync -avz --delete --delay-updates portal-web/dist/ "${SERVER}:${REMOTE_DIR}/static.new/"
 rsync -avz scripts/portal.service "${SERVER}:${REMOTE_DIR}/portal.service"
 
-echo "Activating new binary..."
-ssh "${SERVER}" "cd ${REMOTE_DIR} && cp -f portal portal.prev && mv portal.new portal"
+echo "Activating new release..."
+ssh "${SERVER}" "set -e; cd ${REMOTE_DIR}; \
+    if [ -f portal ]; then cp -f portal portal.prev; fi; \
+    if [ -d static ]; then rm -rf static.prev && mv static static.prev; fi; \
+    mv portal.new portal; \
+    mv static.new static"
 
 echo "Restarting portal service..."
-ssh "${SERVER}" "sudo systemctl restart portal"
+if ! ssh "${SERVER}" "sudo systemctl restart portal"; then
+    echo "Service restart failed."
+    rollback
+    exit 1
+fi
 
 echo "Waiting for health check at ${HEALTH_URL}..."
 healthy=0
@@ -49,9 +66,8 @@ for _ in $(seq 1 15); do
 done
 
 if [ "${healthy}" != "1" ]; then
-    echo "Health check failed — rolling back to the previous binary..."
-    ssh "${SERVER}" "cd ${REMOTE_DIR} && mv portal.prev portal && sudo systemctl restart portal"
-    echo "Rolled back; the site should be running the previous version."
+    echo "Health check failed."
+    rollback
     exit 1
 fi
 
