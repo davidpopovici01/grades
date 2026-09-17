@@ -11,6 +11,7 @@ import (
 	"github.com/davidpopovici01/grades/internal/portalserver"
 )
 
+// main loads the portal configuration and starts the HTTP server.
 func main() {
 	cfg := portalserver.Config{
 		StaticDir:       getEnv("PORTAL_STATIC_DIR", "./static"),

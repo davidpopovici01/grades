@@ -222,6 +222,7 @@ func TestUnknownAPIPathReturnsJSON404(t *testing.T) {
 	}
 }
 
+// TestHealthEndpoint verifies that the liveness probe reports status and version.
 func TestHealthEndpoint(t *testing.T) {
 	server := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
