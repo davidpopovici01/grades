@@ -112,13 +112,14 @@ func TestPortalCategoryScoreCountsMissingLateAndExplicitZero(t *testing.T) {
 	}
 }
 
+// TestEffectiveAssignmentPercentPassPenalty verifies pass-based late penalties.
 func TestEffectiveAssignmentPercentPassPenalty(t *testing.T) {
 	pass := sql.NullFloat64{Valid: true, Float64: 0}
 	cases := []struct {
-		name    string
-		record  GradeRecord
-		pass    sql.NullFloat64
-		want    float64
+		name   string
+		record GradeRecord
+		pass   sql.NullFloat64
+		want   float64
 	}{
 		{"pass only", GradeRecord{Flags: flagPass}, pass, 100},
 		{"pass late", GradeRecord{Flags: flagPass | flagLate}, pass, 90},

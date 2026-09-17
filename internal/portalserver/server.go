@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// Version is the portal build version, stamped via ldflags at release time.
+var Version = "dev"
+
 // Config holds the portal server configuration.
 type Config struct {
 	StaticDir       string
@@ -89,6 +92,9 @@ func (s *Server) Handler() http.Handler {
 	rl := newRateLimiter(limit, time.Minute)
 
 	mux := http.NewServeMux()
+
+	// Unauthenticated liveness probe for deploy verification and uptime checks.
+	mux.HandleFunc("/api/health", s.handleHealth)
 
 	// Student routes
 	mux.HandleFunc("/api/login", s.handleLogin)
@@ -188,6 +194,11 @@ func (s *Server) Handler() http.Handler {
 	handler = s.loggingMiddleware(handler)
 
 	return handler
+}
+
+// handleHealth reports liveness and the build version; no auth required.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": Version})
 }
 
 // adminCookieName carries the teacher token as an HttpOnly cookie for

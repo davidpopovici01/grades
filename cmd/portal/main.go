@@ -11,6 +11,7 @@ import (
 	"github.com/davidpopovici01/grades/internal/portalserver"
 )
 
+// main loads the portal configuration and starts the HTTP server.
 func main() {
 	cfg := portalserver.Config{
 		StaticDir:       getEnv("PORTAL_STATIC_DIR", "./static"),
@@ -37,7 +38,7 @@ func main() {
 	}
 	defer server.Close()
 
-	log.Printf("Portal server starting on %s", cfg.Addr)
+	log.Printf("Portal server starting on %s (version %s)", cfg.Addr, portalserver.Version)
 	log.Printf("Static dir: %s", cfg.StaticDir)
 	if cfg.TeacherToken == "" {
 		log.Println("Warning: PORTAL_TEACHER_TOKEN not set; admin endpoints are disabled")
