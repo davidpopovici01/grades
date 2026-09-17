@@ -4,7 +4,7 @@ project_name: grades
 
 before:
   hooks:
-    - go test ./...
+    - go test ./cmd/... ./internal/... .
 
 builds:
   - id: grades
@@ -22,6 +22,18 @@ builds:
       - amd64
       - arm64
 
+  - id: portal
+    main: ./cmd/portal
+    binary: portal
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/davidpopovici01/grades/internal/portalserver.Version={{ .Version }}
+    goos:
+      - linux
+    goarch:
+      - amd64
+
 archives:
   - id: default
     ids:
@@ -35,7 +47,25 @@ archives:
       - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
+
+  # The portal server plus the built frontend, laid out like the deploy
+  # target: the binary next to a static/ directory.
+  - id: portal
+    ids:
+      - portal
+    name_template: >-
+      {{ .ProjectName }}-portal_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    formats:
+      - tar.gz
+    files:
+      - src: portal-web/dist/**
+        dst: static
+        strip_parent: true
 
 checksum:
   name_template: checksums.txt

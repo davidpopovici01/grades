@@ -222,6 +222,24 @@ func TestUnknownAPIPathReturnsJSON404(t *testing.T) {
 	}
 }
 
+func TestHealthEndpoint(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if body["status"] != "ok" || body["version"] == "" {
+		t.Fatalf("unexpected health body: %v", body)
+	}
+}
+
 // newTestServer creates a server backed by temp-dir static files and database.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()

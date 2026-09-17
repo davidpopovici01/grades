@@ -1,110 +1,75 @@
 # Releasing And Packaging
 
-This repository now includes automated CI and tagged releases.
+This repository uses pull-request-based development with automated CI, tagged releases, and auto-deploy of the portal.
 
-## What Happens Automatically
+## Day-To-Day Workflow
 
-### CI
+1. Branch from `master`, make your change, push the branch.
+2. Open a pull request. CI runs gofmt, `go vet`, `go test -race`, the frontend lint + build, and a full build. CodeRabbit reviews the PR automatically.
+3. Merge when green. **Merging to `master` auto-deploys the portal to production** (see below).
 
-On pushes and pull requests to `master`, GitHub Actions runs:
+Direct pushes to `master` are blocked by branch protection.
 
-- `go test ./...`
+## CI
 
-This verifies the CLI and migration suite before merge.
+On pushes and pull requests to `master`, GitHub Actions runs three jobs:
 
-### Release
+- **go** — gofmt check, `go vet`, `go test -race` (the runner has a JDK, so the Java grader tests run for real)
+- **frontend** — `npm ci`, `npm run lint`, `npm run build` in `portal-web`
+- **build** — `go build` of the CLI and portal binaries
 
-When you push a semantic version tag such as:
+On a push to `master` (i.e. a merged PR), a fourth job deploys the portal.
 
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
-```
+## Auto-Deploy
 
-GitHub Actions runs Goreleaser and publishes:
+The `deploy` job runs `scripts/deploy.sh`, which:
 
-- Windows archives
-- macOS archives
-- Linux archives
-- checksums
+- builds the frontend and the linux/amd64 portal binary (version-stamped from git)
+- uploads over SSH as the unprivileged `portal` user (never root)
+- swaps the binary atomically, restarts `portal.service`, and probes `https://grades.mrpopovici.com/api/health`
+- **rolls back to the previous binary automatically** if the health check fails
 
-The release artifacts are attached to the GitHub Release for that tag.
+One-time setup for this to work:
 
-## Supported Targets
+1. Generate a dedicated keypair: `ssh-keygen -t ed25519 -f github-deploy`
+2. On the VPS, run the updated `scripts/server-setup.sh` (installs a narrow sudoers rule), then add `github-deploy.pub` to `/home/portal/.ssh/authorized_keys`
+3. In the repo: create a GitHub **Environment** named `production` and add the private key as its secret `DEPLOY_SSH_KEY`
+4. Add a repo **variable** `DEPLOY_KNOWN_HOSTS` containing the output of `ssh-keyscan 185.223.207.226` (run from a machine that already trusts the server)
 
-The packaged builds target:
+You can still deploy from your own machine with `./scripts/deploy.sh` — same script, same safety behavior.
 
-- Windows
-  - `amd64`
-  - `arm64`
-- macOS
-  - `amd64`
-  - `arm64`
-- Linux
-  - `amd64`
-  - `arm64`
+## Tagged Releases
 
-## Output Format
-
-Goreleaser builds a binary named:
-
-```text
-grades
-```
-
-Archives are generated as:
-
-- `.zip` on Windows
-- `.tar.gz` on macOS and Linux
-
-Each release also includes a checksum file.
-
-## Release Process
-
-### 1. Make Sure Main Is Ready
-
-Before tagging:
-
-- merge the PR into `master`
-- confirm CI is green
-- make sure documentation is up to date
-
-### 2. Create The Tag
+Push a semantic version tag:
 
 ```powershell
 git switch master
 git pull
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-### 3. Wait For Release Automation
+GitHub Actions runs Goreleaser and publishes:
 
-The release workflow:
-
-- checks out the code
-- sets up Go
-- runs Goreleaser
-- publishes the archives and checksums
+- **CLI archives** — Windows, macOS, Linux (`amd64`/`arm64`), binary named `grades`
+- **Portal archive** — `grades-portal_<version>_linux_amd64.tar.gz`: the `portal` server binary plus `static/` (the built frontend), laid out like the deploy target
+- checksums for everything
 
 ## Local Dry Run
-
-If you want to test the release config locally, install Goreleaser and run:
 
 ```powershell
 goreleaser release --snapshot --clean
 ```
 
-This builds the artifacts locally without publishing a GitHub release.
+This builds all artifacts locally without publishing a GitHub release. The frontend must be built first (`cd portal-web && npm ci && npm run build`) so the portal archive can include `static/`.
+
+## Dependency Updates
+
+Dependabot opens weekly PRs for Go modules, npm packages, and GitHub Actions. Actions in workflows are pinned to commit SHAs; Dependabot bumps them like any other dependency.
 
 ## Future Packaging Options
-
-The current setup publishes release archives, which is the correct first step.
-
-Possible next steps later:
 
 - Scoop manifest for Windows
 - Homebrew tap for macOS
 - package-manager-specific Linux distribution packages
-
-Those can be added after the archive release process is stable.
+- cosign signing + SBOM for release artifacts

@@ -6,10 +6,24 @@ MATERIALS_DOMAIN="${2:-materials.mrpopovici.com}"
 
 echo "=== Setting up $DOMAIN portal ==="
 
-# Create portal user and directories
-sudo useradd -r -s /bin/false portal 2>/dev/null || true
-sudo mkdir -p /opt/portal/static /opt/portal/materials /opt/portal/submissions /opt/portal/lib
+# Create portal user and directories. The portal user needs a real shell and
+# a home directory because deploys SSH in as this user (rsync runs the remote
+# side through the login shell). The account stays unprivileged; the sudoers
+# rule below only allows restarting its own service.
+sudo useradd -r -m -s /bin/bash portal 2>/dev/null || true
+sudo usermod -s /bin/bash portal
+sudo mkdir -p /home/portal/.ssh /opt/portal/static /opt/portal/materials /opt/portal/submissions /opt/portal/lib
+sudo chmod 700 /home/portal/.ssh
+sudo chown -R portal:portal /home/portal
 sudo chown -R portal:portal /opt/portal
+
+# Deploys SSH in as the unprivileged portal user; this rule lets it restart
+# its own service (and nothing else) without a password.
+sudo tee /etc/sudoers.d/portal-deploy > /dev/null << 'EOF'
+portal ALL=(root) NOPASSWD: /usr/bin/systemctl restart portal, /usr/bin/systemctl daemon-reload
+EOF
+sudo chmod 440 /etc/sudoers.d/portal-deploy
+sudo visudo -cf /etc/sudoers.d/portal-deploy
 
 # Runtimes for code submissions: the JDK compiles/runs Java submissions and
 # hosts JPlag; python3 runs Python submissions. JPlag 6 requires Java 25+.
@@ -110,8 +124,9 @@ echo "Next steps:"
 echo "  1. Make sure $DOMAIN and $MATERIALS_DOMAIN have A records pointing at this server"
 echo "  2. Deploy the code from your laptop:  ./scripts/deploy.sh"
 echo "  3. Start the service:                 sudo systemctl enable --now portal"
-echo "  4. On your laptop, add to ~/.grades/config.yaml:"
+echo "  4. Authorize the CI deploy key:  paste its public key into /home/portal/.ssh/authorized_keys"
+echo "  5. On your laptop, add to ~/.grades/config.yaml:"
 echo "       portal:"
 echo "         url: https://$DOMAIN"
 echo "         teacher_token: $TEACHER_TOKEN"
-echo "  5. Publish grades from your laptop:   grades publish"
+echo "  6. Publish grades from your laptop:   grades publish"
