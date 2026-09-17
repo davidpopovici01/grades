@@ -228,12 +228,20 @@ func (g *Grader) runHarness(language, srcDir string, srcFiles []string, harnessP
 			}
 		}
 		javaFiles = append(javaFiles, harnessName)
-		compileArgs := append([]string{"-encoding", "UTF-8"}, javaFiles...)
+		// Bound the compiler JVM's heap too: HotSpot defaults max heap to a
+		// quarter of host RAM, which on a large host exceeds the sandbox
+		// address-space cap and kills javac before it starts.
+		compileArgs := append([]string{"-J-Xmx512m", "-encoding", "UTF-8"}, javaFiles...)
 		_, compileErr, compileCode, compileTimeout := runSandboxed(stage, testRunTimeout, javaLimits, javac, compileArgs...)
 		if compileTimeout {
 			return "timeout", 0, 1, "compilation timed out"
 		}
 		if compileCode != 0 {
+			if strings.TrimSpace(compileErr) == "" {
+				// A JVM that dies before producing diagnostics (e.g. killed by
+				// a resource cap) prints nothing — still record something useful.
+				compileErr = fmt.Sprintf("compilation failed (javac exit %d, no output)", compileCode)
+			}
 			return "done", 0, 1, compileErr
 		}
 		mainClass := strings.TrimSuffix(harnessName, filepath.Ext(harnessName))
