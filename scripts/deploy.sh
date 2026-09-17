@@ -42,21 +42,27 @@ rsync -avz --delete --delay-updates portal-web/dist/ "${SERVER}:${REMOTE_DIR}/st
 rsync -avz scripts/portal.service "${SERVER}:${REMOTE_DIR}/portal.service"
 
 echo "Activating new release..."
-if ! ssh "${SERVER}" "set -e; cd ${REMOTE_DIR}; \
+if ssh "${SERVER}" "set -e; cd ${REMOTE_DIR}; \
     if [ -f portal ]; then cp -f portal portal.prev; fi; \
     if [ -d static ]; then rm -rf static.prev && mv static static.prev; fi; \
     mv portal.new portal; \
     mv static.new static"; then
+    :
+else
+    status=$?
     echo "Activation failed."
     rollback
-    exit 1
+    exit "${status}"
 fi
 
 echo "Restarting portal service..."
-if ! ssh "${SERVER}" "sudo systemctl restart portal"; then
+if ssh "${SERVER}" "sudo systemctl restart portal"; then
+    :
+else
+    status=$?
     echo "Service restart failed."
     rollback
-    exit 1
+    exit "${status}"
 fi
 
 echo "Waiting for health check at ${HEALTH_URL}..."
