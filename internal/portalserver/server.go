@@ -2,7 +2,9 @@ package portalserver
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,6 +28,7 @@ type Config struct {
 	MaterialsDir    string
 	SubmissionsDir  string
 	JPlagJar        string
+	DemoPassword    string
 }
 
 // Server is the student portal HTTP server, backed by a SQLite store.
@@ -35,6 +38,8 @@ type Server struct {
 	store     *Store
 	grader    *Grader
 	cooldowns *cooldownTracker
+	// demoEnabled reports whether the read-only demo account was seeded.
+	demoEnabled bool
 	// plagViewerDir holds the report viewer extracted from the JPlag jar;
 	// empty when the jar or its bundled viewer is missing.
 	plagViewerDir string
@@ -66,10 +71,34 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	server := &Server{
-		config:    cfg,
-		jwt:       NewJWTHelper(cfg.JWTSecret),
-		store:     store,
-		cooldowns: newCooldownTracker(),
+		config:      cfg,
+		jwt:         NewJWTHelper(cfg.JWTSecret),
+		store:       store,
+		cooldowns:   newCooldownTracker(),
+		demoEnabled: cfg.DemoPassword != "",
+	}
+	if server.demoEnabled {
+		if err := store.SeedDemo(cfg.DemoPassword); err != nil {
+			if errors.Is(err, errDemoUsernameTaken) {
+				// A real student owns the reserved username (assigned before
+				// the CLI reserved it). The student wins; run without a demo.
+				log.Printf("Demo account disabled: %v", err)
+				server.demoEnabled = false
+				if err := server.clearDemo(); err != nil {
+					_ = store.Close()
+					return nil, fmt.Errorf("failed to clear demo account: %w", err)
+				}
+			} else {
+				_ = store.Close()
+				return nil, fmt.Errorf("failed to seed demo account: %w", err)
+			}
+		} else if err := server.seedDemoMaterials(); err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("failed to seed demo materials: %w", err)
+		}
+	} else if err := server.clearDemo(); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("failed to clear demo account: %w", err)
 	}
 	server.plagViewerDir = extractPlagViewer(cfg.JPlagJar)
 	server.grader = newGrader(store, cfg.SubmissionsDir, cfg.JPlagJar)
@@ -199,6 +228,11 @@ func (s *Server) Handler() http.Handler {
 // handleHealth reports liveness and the build version; no auth required.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": Version})
+}
+
+// isDemo reports whether the claims belong to the shared read-only demo account.
+func (s *Server) isDemo(claims *PortalClaims) bool {
+	return s.demoEnabled && claims.Username == demoUsername
 }
 
 // adminCookieName carries the teacher token as an HttpOnly cookie for

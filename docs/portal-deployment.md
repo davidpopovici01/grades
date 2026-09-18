@@ -102,6 +102,7 @@ ssh user@server "sudo systemctl enable --now portal"
 | `PORTAL_MATERIALS_DIR` | `/opt/portal/materials` | where per-class uploaded documents are stored |
 | `PORTAL_SUBMISSIONS_DIR` | `/opt/portal/submissions` | student code submissions, test harnesses, and run workspaces |
 | `PORTAL_JPLAG_JAR` | `/opt/portal/lib/jplag.jar` | JPlag jar used for plagiarism detection |
+| `PORTAL_DEMO_PASSWORD` | *(commented out)* | optional password for the read-only demo student account |
 
 The unit sets `MemoryMax=1536M` as a safety cap. Test runs and plagiarism checks are serialized through a single-worker queue, so peak usage is one `javac`/`java`/`python3` run (30 s wall / 25 s CPU via `prlimit`; 512 MB address space for Python, 4 GB address space with a 256 MB `-Xmx` heap for Java, which needs the extra virtual space to start) or one JPlag run (`-Xmx384m`) at a time on top of the Go server itself (~60 MB).
 
@@ -205,6 +206,18 @@ The server counts the `PASS:`/`FAIL:` lines. Harnesses can be edited in place fr
 **Plagiarism**: the assignment detail page has a plagiarism check that runs JPlag locally over every student's latest submission and shows a similarity table (pairs above 70% highlighted). Every run uses frequency analysis (code fragments shared by many submissions are downweighted, so idiomatic boilerplate counts less) and subsequence match merging (counters match-splitting obfuscation); Java runs additionally use token normalization (renaming variables/methods no longer hides copying). The Plagiarism Check card also has an optional **base code** area: starter/template files uploaded there are subtracted from every submission before comparing (`-bc`). Submissions are labeled by **username** inside the report, so the viewer shows `john.doe` instead of a numeric id. Nothing is uploaded to third parties. After a finished run, **View Full Report** opens the interactive JPlag report viewer (with side-by-side code comparisons) right on the portal in a new tab — the viewer is extracted from the JPlag jar into `/opt/portal/lib/report-viewer/` at service start and served under the viewer's own root-level pages (`/overview`, `/comparison/…`); the report data itself stays behind admin auth via a short-lived `portal_admin` cookie. **Download** fetches the raw `.jplag` file, which also stays on disk at `/opt/portal/submissions/plag/<run_id>.jplag`.
 
 Requirements on the server (installed by `server-setup.sh`): a JDK (Java 25+ for JPlag 6.3; student submission testing itself works with any modern JDK), `python3`, and the JPlag jar at `/opt/portal/lib/jplag.jar`. If any are missing, submissions still work — test runs are marked `unavailable` and the plagiarism UI reports what's missing.
+
+### Demo account
+
+Setting `PORTAL_DEMO_PASSWORD` (or `PORTAL_DEMO_PASSWORD_FILE`, same pattern as the teacher token) makes the server seed a shared, read-only **demo student account** at startup — useful for showing the portal to prospective teachers without touching real data:
+
+- Logs in through the normal login form with username `demo` and the configured password. Share the password privately; it is not displayed anywhere on the site.
+- Sees a synthetic sample course ("Sample APCSA") with a realistic grade snapshot, two sample materials, and one sample submission assignment.
+- Cannot change the password or upload/submit/test submissions — all mutations return `403 demo account is read-only`, so one visitor cannot lock out the next.
+
+The demo data uses reserved **negative IDs** (`student_pk = -1`, `course_year_id = -1`, `term_id = -1`) that the CLI's autoincrement IDs can never collide with, and the publish cleanup skips negative-ID rows, so publishing real courses never touches the demo account. The username `demo` is reserved end to end: the CLI never generates it for a student (`portalauth.IsReservedUsername`), and if a legacy account already owns it, the server disables the demo at startup instead of touching the real account. Removing the variable and restarting deletes the demo account, course, snapshot, sample assignment, and sample materials directory, so the shared password stops working immediately.
+
+Enabling or rotating the demo password requires editing the live unit on the VPS (`/etc/systemd/system/portal.service`) and running `sudo systemctl daemon-reload && sudo systemctl restart portal` — `deploy.sh` does not manage the unit.
 
 ## Backups
 

@@ -18,6 +18,9 @@ Environment="PORTAL_RATE_LIMIT=300"
 Environment="PORTAL_MATERIALS_DIR=/opt/portal/materials"
 Environment="PORTAL_SUBMISSIONS_DIR=/opt/portal/submissions"
 Environment="PORTAL_JPLAG_JAR=/opt/portal/lib/jplag.jar"
+# Optional: seeds a shared read-only demo student account (username "demo").
+# Share the password privately; remove the line and restart to delete the account.
+#Environment="PORTAL_DEMO_PASSWORD=choose-a-strong-password"
 ExecStart=/opt/portal/portal
 Restart=on-failure
 RestartSec=5

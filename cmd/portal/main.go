@@ -24,6 +24,7 @@ func main() {
 		SubmissionsDir:  getEnv("PORTAL_SUBMISSIONS_DIR", "./submissions"),
 		JPlagJar:        getEnv("PORTAL_JPLAG_JAR", "/opt/portal/lib/jplag.jar"),
 		TeacherToken:    getTeacherToken(),
+		DemoPassword:    getDemoPassword(),
 	}
 
 	secret := getJWTSecret()
@@ -101,6 +102,21 @@ func getTeacherToken() string {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			log.Printf("Warning: cannot read teacher token file: %v", err)
+			return ""
+		}
+		return strings.TrimSpace(string(data))
+	}
+	return ""
+}
+
+func getDemoPassword() string {
+	if v := os.Getenv("PORTAL_DEMO_PASSWORD"); v != "" {
+		return v
+	}
+	if path := os.Getenv("PORTAL_DEMO_PASSWORD_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("Warning: cannot read demo password file: %v", err)
 			return ""
 		}
 		return strings.TrimSpace(string(data))

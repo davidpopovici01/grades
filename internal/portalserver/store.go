@@ -313,6 +313,11 @@ func remapStudentIDs(db dbtx, idMap []PortalIDMapping) error {
 			rows.Close()
 			return err
 		}
+		// Negative IDs are server-managed reserved rows (the demo account):
+		// never renumber them or delete them as orphans.
+		if id < 0 {
+			continue
+		}
 		newID, ok := newIDByUsername[strings.ToLower(username)]
 		switch {
 		case !ok:

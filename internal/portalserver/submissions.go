@@ -1464,6 +1464,10 @@ func (s *Server) handleStudentSubmissionUpload(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	if s.isDemo(claims) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
+		return
+	}
 	a := s.studentAssignment(w, r, claims.StudentID)
 	if a == nil {
 		return
@@ -1659,6 +1663,10 @@ func (s *Server) handleStudentSubmissionSlot(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	if s.isDemo(claims) && r.Method != http.MethodGet {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
+		return
+	}
 	a := s.studentAssignment(w, r, claims.StudentID)
 	if a == nil {
 		return
@@ -1788,6 +1796,10 @@ func (s *Server) handleStudentSubmissionSubmit(w http.ResponseWriter, r *http.Re
 	claims, err := s.readToken(r)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if s.isDemo(claims) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
 		return
 	}
 	a := s.studentAssignment(w, r, claims.StudentID)
@@ -2010,6 +2022,10 @@ func (s *Server) handleStudentSubmissionTest(w http.ResponseWriter, r *http.Requ
 	claims, err := s.readToken(r)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if s.isDemo(claims) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
 		return
 	}
 	a := s.studentAssignment(w, r, claims.StudentID)

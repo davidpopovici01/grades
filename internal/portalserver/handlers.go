@@ -141,6 +141,10 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	if s.isDemo(claims) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
+		return
+	}
 
 	var req struct {
 		CurrentPassword string `json:"currentPassword"`
@@ -451,6 +455,13 @@ func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request
 	}
 	if acc == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "account not found"})
+		return
+	}
+	// Resetting the demo account would set its password to "demo" and force a
+	// password change that the read-only guard then rejects, locking every
+	// demo visitor out until a restart re-seeds it.
+	if acc.StudentID == demoStudentID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
 		return
 	}
 
