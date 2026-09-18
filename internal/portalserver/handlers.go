@@ -141,6 +141,10 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	if s.isDemo(claims) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
+		return
+	}
 
 	var req struct {
 		CurrentPassword string `json:"currentPassword"`
