@@ -489,7 +489,7 @@ func TestServerDisablesDemoWhenRealStudentOwnsUsername(t *testing.T) {
 	}
 	change, _ := json.Marshal(map[string]string{"currentPassword": "real-student-pass", "newPassword": "new-real-pass-1"})
 	rec = demoRequest(t, server.Handler(), rec.Result().Cookies(), http.MethodPost, "/api/change-password", change)
-	if rec.Code == http.StatusForbidden {
-		t.Error("real student must not be treated as the read-only demo account")
+	if rec.Code != http.StatusOK {
+		t.Errorf("real student must be able to change their password (not read-only): %d %s", rec.Code, rec.Body.String())
 	}
 }
