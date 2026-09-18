@@ -309,7 +309,10 @@ func (s *Server) seedDemoMaterials() error {
 		}
 	}
 	metaPath := filepath.Join(dir, courseMetaFile)
-	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
+	if _, err := os.Stat(metaPath); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to inspect demo materials metadata: %w", err)
+		}
 		meta := courseMeta{Categories: []categoryMeta{{ID: "unit-1", Name: "Unit 1"}}}
 		if err := writeCourseMeta(dir, meta); err != nil {
 			return fmt.Errorf("failed to write demo materials metadata: %w", err)

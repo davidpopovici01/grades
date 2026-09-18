@@ -39,7 +39,11 @@ func newDemoTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { server.Close() })
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("closing server: %v", err)
+		}
+	})
 	return server
 }
 
@@ -84,7 +88,11 @@ func TestSeedDemoCreatesAccountCourseAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("closing store: %v", err)
+		}
+	})
 
 	if err := store.SeedDemo(demoTestPassword); err != nil {
 		t.Fatalf("SeedDemo: %v", err)
@@ -220,7 +228,11 @@ func TestPublishCourseKeepsDemoAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("closing store: %v", err)
+		}
+	})
 
 	if err := store.SeedDemo(demoTestPassword); err != nil {
 		t.Fatalf("SeedDemo: %v", err)
@@ -342,7 +354,11 @@ func TestClearDemoRemovesSeededData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("closing store: %v", err)
+		}
+	})
 
 	if err := store.SeedDemo(demoTestPassword); err != nil {
 		t.Fatal(err)
