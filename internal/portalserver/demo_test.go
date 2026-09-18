@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -491,5 +492,41 @@ func TestServerDisablesDemoWhenRealStudentOwnsUsername(t *testing.T) {
 	rec = demoRequest(t, server.Handler(), rec.Result().Cookies(), http.MethodPost, "/api/change-password", change)
 	if rec.Code != http.StatusOK {
 		t.Errorf("real student must be able to change their password (not read-only): %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminCannotResetDemoPassword(t *testing.T) {
+	server := newDemoTestServer(t)
+	handler := server.Handler()
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/admin/students/"+strconv.Itoa(demoStudentID)+"/reset-password", nil)
+	req.Header.Set("Authorization", "Bearer test-teacher-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 resetting the demo password, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The demo password still works afterwards.
+	loginDemo(t, handler)
+}
+
+func TestClearDemoRemovesMaterials(t *testing.T) {
+	server := newDemoTestServer(t)
+
+	dir := server.materialsDir(demoCourseYearID, demoTermID, demoCourseName)
+	if _, err := os.Stat(filepath.Join(dir, "unit-1", "syllabus.md")); err != nil {
+		t.Fatalf("demo materials not seeded: %v", err)
+	}
+
+	if err := server.clearDemo(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("demo materials directory should be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(server.config.MaterialsDir)); err != nil {
+		t.Errorf("the materials root itself must remain: %v", err)
 	}
 }

@@ -21,6 +21,7 @@ const (
 	demoStudentID    = -1
 	demoCourseYearID = -1
 	demoTermID       = -1
+	demoCourseName   = "Sample APCSA"
 )
 
 //go:embed demo_materials/syllabus.md
@@ -266,7 +267,7 @@ func (s *Store) SeedDemo(password string) error {
 	if err := upsertAccount(s.db, acc); err != nil {
 		return err
 	}
-	if err := upsertCourse(s.db, demoCourseYearID, demoTermID, "Sample APCSA", "2026-27", "Term 1", now); err != nil {
+	if err := upsertCourse(s.db, demoCourseYearID, demoTermID, demoCourseName, "2026-27", "Term 1", now); err != nil {
 		return err
 	}
 	if err := upsertStudentSnapshot(s.db, demoStudentID, demoCourseYearID, demoTermID, []byte(demoSnapshotJSON), now); err != nil {
@@ -281,9 +282,22 @@ func (s *Store) SeedDemo(password string) error {
 	return err
 }
 
-// ClearDemo removes every demo row. It runs at startup when no demo password
-// is configured, so disabling the demo also disables the loggable account
-// instead of leaving it behind with its last-seeded password.
+// clearDemo removes every demo row and the demo materials directory. It runs
+// at startup when no demo password is configured (or when a real student owns
+// the reserved username), so disabling the demo also disables the loggable
+// account instead of leaving it behind with its last-seeded password.
+func (s *Server) clearDemo() error {
+	if err := s.store.ClearDemo(); err != nil {
+		return err
+	}
+	// The demo course's negative IDs isolate its directory from real materials.
+	if err := os.RemoveAll(s.materialsDir(demoCourseYearID, demoTermID, demoCourseName)); err != nil {
+		return fmt.Errorf("failed to remove demo materials: %w", err)
+	}
+	return nil
+}
+
+// ClearDemo removes every demo row.
 func (s *Store) ClearDemo() error {
 	statements := []struct {
 		query string
@@ -306,7 +320,7 @@ func (s *Store) ClearDemo() error {
 // course materials. Existing files with identical content are left untouched,
 // and _meta.json is written only when missing so admin-UI edits survive.
 func (s *Server) seedDemoMaterials() error {
-	dir := s.materialsDir(demoCourseYearID, demoTermID, "Sample APCSA")
+	dir := s.materialsDir(demoCourseYearID, demoTermID, demoCourseName)
 	unitDir := filepath.Join(dir, "unit-1")
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		return err

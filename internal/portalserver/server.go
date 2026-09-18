@@ -84,7 +84,7 @@ func NewServer(cfg Config) (*Server, error) {
 				// the CLI reserved it). The student wins; run without a demo.
 				log.Printf("Demo account disabled: %v", err)
 				server.demoEnabled = false
-				if err := store.ClearDemo(); err != nil {
+				if err := server.clearDemo(); err != nil {
 					_ = store.Close()
 					return nil, fmt.Errorf("failed to clear demo account: %w", err)
 				}
@@ -96,7 +96,7 @@ func NewServer(cfg Config) (*Server, error) {
 			_ = store.Close()
 			return nil, fmt.Errorf("failed to seed demo materials: %w", err)
 		}
-	} else if err := store.ClearDemo(); err != nil {
+	} else if err := server.clearDemo(); err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("failed to clear demo account: %w", err)
 	}

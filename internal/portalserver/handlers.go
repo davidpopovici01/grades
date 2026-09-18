@@ -457,6 +457,13 @@ func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "account not found"})
 		return
 	}
+	// Resetting the demo account would set its password to "demo" and force a
+	// password change that the read-only guard then rejects, locking every
+	// demo visitor out until a restart re-seeds it.
+	if acc.StudentID == demoStudentID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo account is read-only"})
+		return
+	}
 
 	// The temporary password is the student's own username; must_change_password
 	// forces them to pick a real one at next login.
