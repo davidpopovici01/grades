@@ -3,6 +3,7 @@ package portalserver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -387,5 +388,108 @@ func TestClearDemoRemovesSeededData(t *testing.T) {
 	}
 	if assignments != 0 {
 		t.Errorf("demo submission assignments should be removed, found %d", assignments)
+	}
+}
+
+// seedRealDemoAccount inserts a real student account that owns the reserved
+// demo username (possible for accounts created before the CLI reserved it).
+func seedRealDemoAccount(t *testing.T, store *Store, studentID int) {
+	t.Helper()
+	hash, salt, err := portalauth.HashPassword("real-student-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.db.Exec(`
+		INSERT INTO published_accounts(student_pk, username, password_salt, password_hash, must_change_password, password_changed_at)
+		VALUES (?, ?, ?, ?, 0, ?)`,
+		studentID, demoUsername, salt, hash, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSeedDemoFailsWhenRealStudentOwnsUsername(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "portal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("closing store: %v", err)
+		}
+	})
+
+	seedRealDemoAccount(t, store, 42)
+
+	if err := store.SeedDemo(demoTestPassword); !errors.Is(err, errDemoUsernameTaken) {
+		t.Fatalf("expected errDemoUsernameTaken, got %v", err)
+	}
+
+	// The real student's account must be untouched.
+	acc, err := store.GetAccountByUsername(demoUsername)
+	if err != nil || acc == nil {
+		t.Fatalf("real account missing after failed seed (acc=%+v, err=%v)", acc, err)
+	}
+	if acc.StudentID != 42 {
+		t.Errorf("expected real student_pk 42, got %d", acc.StudentID)
+	}
+	if !portalauth.VerifyPassword("real-student-pass", acc.PasswordSalt, acc.PasswordHash) {
+		t.Error("real student password must survive the failed seed")
+	}
+}
+
+func TestServerDisablesDemoWhenRealStudentOwnsUsername(t *testing.T) {
+	tmpDir := t.TempDir()
+	staticDir := filepath.Join(tmpDir, "static")
+	if err := os.MkdirAll(staticDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("<html></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(filepath.Join(tmpDir, "portal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedRealDemoAccount(t, store, 42)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err := NewServer(Config{
+		StaticDir:      staticDir,
+		DBPath:         filepath.Join(tmpDir, "portal.db"),
+		JWTSecret:      []byte("test-secret-key-that-is-long-enough"),
+		TeacherToken:   "test-teacher-token",
+		MaterialsDir:   filepath.Join(tmpDir, "materials"),
+		SubmissionsDir: filepath.Join(tmpDir, "submissions"),
+		DemoPassword:   demoTestPassword,
+	})
+	if err != nil {
+		t.Fatalf("server must start despite the demo username conflict: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("closing server: %v", err)
+		}
+	})
+	if server.demoEnabled {
+		t.Error("demo must be disabled when a real student owns the username")
+	}
+
+	// The real student logs in with their own password and is not read-only.
+	body, _ := json.Marshal(map[string]string{"username": demoUsername, "password": "real-student-pass"})
+	req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("real student login failed: %d %s", rec.Code, rec.Body.String())
+	}
+	change, _ := json.Marshal(map[string]string{"currentPassword": "real-student-pass", "newPassword": "new-real-pass-1"})
+	rec = demoRequest(t, server.Handler(), rec.Result().Cookies(), http.MethodPost, "/api/change-password", change)
+	if rec.Code == http.StatusForbidden {
+		t.Error("real student must not be treated as the read-only demo account")
 	}
 }

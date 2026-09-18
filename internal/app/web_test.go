@@ -698,3 +698,20 @@ func TestPortalImprovementTipsFollowOverviewLogic(t *testing.T) {
 func portalFixedNow() time.Time {
 	return time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 }
+
+func TestNextPortalUsernameSkipsReservedNames(t *testing.T) {
+	used := map[string]bool{}
+
+	// A student named "Demo" with no last name would normalize to the
+	// reserved demo username; the generator must fall through to a suffix.
+	got := nextPortalUsername(Student{ID: 7, FirstName: "Demo"}, used)
+	if got == "" || got == "demo" {
+		t.Fatalf("reserved username assigned to a student: %q", got)
+	}
+
+	// A school ID that happens to be "demo" is reserved too.
+	got = nextPortalUsername(Student{ID: 8, FirstName: "Ana", LastName: "Smith", SchoolStudentID: "demo"}, used)
+	if got != "ana.smith" {
+		t.Fatalf("expected name-based username, got %q", got)
+	}
+}

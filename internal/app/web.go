@@ -978,7 +978,7 @@ func nextPortalUsername(student Student, used map[string]bool) string {
 		normalizePortalUsername(student.PowerSchoolNum),
 	}
 	for _, candidate := range candidates {
-		if candidate == "" {
+		if candidate == "" || portalauth.IsReservedUsername(candidate) {
 			continue
 		}
 		if !used[strings.ToLower(candidate)] {

@@ -2,7 +2,9 @@ package portalserver
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -77,10 +79,20 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	if server.demoEnabled {
 		if err := store.SeedDemo(cfg.DemoPassword); err != nil {
-			_ = store.Close()
-			return nil, fmt.Errorf("failed to seed demo account: %w", err)
-		}
-		if err := server.seedDemoMaterials(); err != nil {
+			if errors.Is(err, errDemoUsernameTaken) {
+				// A real student owns the reserved username (assigned before
+				// the CLI reserved it). The student wins; run without a demo.
+				log.Printf("Demo account disabled: %v", err)
+				server.demoEnabled = false
+				if err := store.ClearDemo(); err != nil {
+					_ = store.Close()
+					return nil, fmt.Errorf("failed to clear demo account: %w", err)
+				}
+			} else {
+				_ = store.Close()
+				return nil, fmt.Errorf("failed to seed demo account: %w", err)
+			}
+		} else if err := server.seedDemoMaterials(); err != nil {
 			_ = store.Close()
 			return nil, fmt.Errorf("failed to seed demo materials: %w", err)
 		}
