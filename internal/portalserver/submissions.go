@@ -1335,12 +1335,12 @@ func (s *Server) handleAdminSubPlagPairDiff(w http.ResponseWriter, r *http.Reque
 	}
 
 	skip := basecodeLineSet(basecodeDir(s.config.SubmissionsDir, a.ID))
-	filesA, err := s.loadDiffFiles(a.ID, subA)
+	filesA, err := s.loadDiffFiles(a.ID, subA, skip)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read submission files"})
 		return
 	}
-	filesB, err := s.loadDiffFiles(a.ID, subB)
+	filesB, err := s.loadDiffFiles(a.ID, subB, skip)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read submission files"})
 		return
@@ -1361,9 +1361,9 @@ func (s *Server) handleAdminSubPlagPairDiff(w http.ResponseWriter, r *http.Reque
 
 	files := []map[string]any{}
 	for _, name := range fileNames {
-		linesA, inA := filesA[name]
-		linesB, inB := filesB[name]
-		res := diffAlign(linesA, linesB, skip)
+		fileA, inA := filesA[name]
+		fileB, inB := filesB[name]
+		res := compareDiffFiles(fileA, fileB, skip)
 		similarity := 0.0
 		if w := res.weight(); w > 0 {
 			similarity = res.credit / w
@@ -1394,24 +1394,18 @@ func (s *Server) handleAdminSubPlagPairDiff(w http.ResponseWriter, r *http.Reque
 }
 
 // loadDiffFiles reads one submission's text files for the diff view; binary
-// files are skipped.
-func (s *Server) loadDiffFiles(assignmentID int64, sub *SubSubmission) (map[string][]string, error) {
+// files are skipped and oversized content is reduced to line counts.
+func (s *Server) loadDiffFiles(assignmentID int64, sub *SubSubmission, skip map[string]bool) (map[string]*diffFile, error) {
 	files, err := s.store.ListSubFiles(sub.ID)
 	if err != nil {
 		return nil, err
 	}
-	srcDir := submissionDir(s.config.SubmissionsDir, assignmentID, sub.StudentPK, sub.Attempt)
-	out := map[string][]string{}
+	names := make([]string, 0, len(files))
 	for _, f := range files {
-		lines, ok, err := readDiffLines(filepath.Join(srcDir, f.Filename))
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			out[f.Filename] = lines
-		}
+		names = append(names, f.Filename)
 	}
-	return out, nil
+	srcDir := submissionDir(s.config.SubmissionsDir, assignmentID, sub.StudentPK, sub.Attempt)
+	return loadDiffWork(srcDir, names, skip)
 }
 
 // handleAdminSubQueue reports the grading queue depth.

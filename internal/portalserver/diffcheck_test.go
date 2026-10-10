@@ -137,27 +137,58 @@ func TestDiffAlignTooLarge(t *testing.T) {
 	}
 }
 
-func TestReadDiffLines(t *testing.T) {
+func TestReadDiffFile(t *testing.T) {
 	dir := t.TempDir()
 
 	text := filepath.Join(dir, "main.py")
 	if err := os.WriteFile(text, []byte("a\r\nb\rc\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lines, ok, err := readDiffLines(text)
+	df, ok, err := readDiffFile(text, nil)
 	if err != nil || !ok {
 		t.Fatalf("read text: ok=%v err=%v", ok, err)
 	}
-	if len(lines) != 3 || lines[0] != "a" || lines[1] != "b" || lines[2] != "c" {
-		t.Fatalf("lines: %q", lines)
+	if df.tooLarge || len(df.lines) != 3 || df.lines[0] != "a" || df.lines[1] != "b" || df.lines[2] != "c" {
+		t.Fatalf("lines: %+v", df)
 	}
 
 	binary := filepath.Join(dir, "data.bin")
 	if err := os.WriteFile(binary, []byte{'a', 0, 'b'}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := readDiffLines(binary); err != nil || ok {
+	if _, ok, err := readDiffFile(binary, nil); err != nil || ok {
 		t.Fatalf("read binary: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReadDiffFileOversized(t *testing.T) {
+	// A file beyond diffMaxKeepBytes is streamed into line counts: it stays in
+	// scoring (tooLarge, multiset overlap) instead of being dropped.
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.txt")
+	var sb strings.Builder
+	for sb.Len() <= diffMaxKeepBytes {
+		sb.WriteString("some fairly long line of text to fill the file\n")
+	}
+	sb.WriteString("unique marker line\n")
+	if err := os.WriteFile(big, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	df, ok, err := readDiffFile(big, nil)
+	if err != nil || !ok {
+		t.Fatalf("read big: ok=%v err=%v", ok, err)
+	}
+	if !df.tooLarge || df.lines != nil {
+		t.Fatalf("big file should be counts-only: %+v", df)
+	}
+	if df.counts["unique marker line"] != 1 || df.counts["some fairly long line of text to fill the file"] == 0 {
+		t.Fatalf("counts: %v", df.counts)
+	}
+
+	// An oversized pair still scores via the multiset fallback.
+	res := compareDiffFiles(df, df, nil)
+	if !res.tooLarge || res.weight() == 0 || res.credit/res.weight() != 1.0 {
+		t.Fatalf("oversized self-compare: %+v", res)
 	}
 }
 
@@ -197,13 +228,13 @@ func TestBasecodeLineSet(t *testing.T) {
 }
 
 func TestDiffPairSimilarity(t *testing.T) {
-	a := map[string][]string{
-		"main.py": {"print(1)"},
-		"util.py": {"def helper():", "    return 42"},
+	a := map[string]*diffFile{
+		"main.py": {lines: []string{"print(1)"}},
+		"util.py": {lines: []string{"def helper():", "    return 42"}},
 	}
-	b := map[string][]string{
-		"main.py":  {"print(2)"},
-		"extra.py": {"only here"},
+	b := map[string]*diffFile{
+		"main.py":  {lines: []string{"print(2)"}},
+		"extra.py": {lines: []string{"only here"}},
 	}
 	sim := diffPairSimilarity(a, b, nil)
 	// main.py: 0.875 credit / 1 weight; util.py (only A): 0/2; extra.py: 0/1.
