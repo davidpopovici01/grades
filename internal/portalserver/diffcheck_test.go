@@ -173,6 +173,29 @@ func TestStreamDiffFileCountBudget(t *testing.T) {
 	}
 }
 
+func TestToCountsBudget(t *testing.T) {
+	// Converting kept lines to counts honors the same budget as streaming:
+	// unique keys beyond the budget count as overflow, repeated lines are
+	// always counted, and only retained key bytes are charged.
+	df := &diffFile{
+		lines: []string{"aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc", "aaaaaaaaaa"},
+		bytes: 44,
+	}
+	df.toCounts(nil, 25) // room for two 10-byte keys
+	if !df.tooLarge || df.lines != nil {
+		t.Fatalf("conversion should drop lines: %+v", df)
+	}
+	if len(df.counts) != 2 || df.counts["aaaaaaaaaa"] != 2 || df.counts["bbbbbbbbbb"] != 1 {
+		t.Fatalf("counts: %v", df.counts)
+	}
+	if df.overflow != 1 {
+		t.Fatalf("overflow = %d, want 1", df.overflow)
+	}
+	if df.countBytes != 20 {
+		t.Fatalf("countBytes = %d, want 20 (retained keys only)", df.countBytes)
+	}
+}
+
 func TestPairHunkLinesCellBudget(t *testing.T) {
 	// Long lines that pass the histogram prefilter each spend
 	// diffMaxLineRunes^2 cells; the per-hunk budget must stop pairing once
@@ -197,6 +220,33 @@ func TestPairHunkLinesCellBudget(t *testing.T) {
 	}
 	if pairs := pairHunkLines(a, b, rm, ad); len(pairs) != 0 {
 		t.Fatalf("disjoint long lines: pairs = %d, want 0", len(pairs))
+	}
+}
+
+func TestPairHunkLinesBudgetDistribution(t *testing.T) {
+	// With more near-identical long-line candidates than the cell budget
+	// affords, every removed line's positional match is compared first, so
+	// the budget buys one pair per removed line instead of being spent on
+	// alternatives for the first row.
+	maxPairs := diffMaxHunkCells / (diffMaxLineRunes * diffMaxLineRunes)
+	n := maxPairs + 4
+	a, b := make([]string, n), make([]string, n)
+	rm, ad := make([]int, n), make([]int, n)
+	for i := 0; i < n; i++ {
+		a[i] = fmt.Sprintf("%c", 'A'+i) + strings.Repeat("a", diffMaxLineRunes-1)
+		b[i] = a[i]
+		rm[i], ad[i] = i, i
+	}
+	pairs := pairHunkLines(a, b, rm, ad)
+	if len(pairs) != maxPairs {
+		t.Fatalf("pairs = %d, want %d (one per affordable removed line)", len(pairs), maxPairs)
+	}
+	seen := map[int]bool{}
+	for _, p := range pairs {
+		if seen[p.rm] {
+			t.Fatalf("removed line %d paired twice", p.rm)
+		}
+		seen[p.rm] = true
 	}
 }
 

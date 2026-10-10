@@ -68,13 +68,14 @@ type diffFile struct {
 	bytes      int64
 }
 
-// toCounts drops the kept lines in favor of their effective line multiset.
-func (f *diffFile) toCounts(skip map[string]bool) {
+// toCounts drops the kept lines in favor of their effective line multiset,
+// retaining at most budget bytes of unique keys; further unique lines count
+// as overflow (weight, no credit).
+func (f *diffFile) toCounts(skip map[string]bool, budget int) {
 	if f.lines == nil {
 		return
 	}
-	f.counts = effLineCounts(f.lines, skip)
-	f.countBytes = int(f.bytes)
+	f.counts, f.countBytes, f.overflow = boundedLineCounts(f.lines, skip, budget)
 	f.lines = nil
 	f.tooLarge = true
 }
@@ -142,9 +143,11 @@ func readDiffFile(path string, skip map[string]bool, streamBudget int) (df *diff
 	}
 	lines := splitDiffLines(data)
 	if len(lines) > diffMaxKeepLines {
+		counts, countBytes, overflow := boundedLineCounts(lines, skip, streamBudget)
 		return &diffFile{
-			counts:     effLineCounts(lines, skip),
-			countBytes: int(info.Size()),
+			counts:     counts,
+			overflow:   overflow,
+			countBytes: countBytes,
 			tooLarge:   true,
 			bytes:      info.Size(),
 		}, true, nil
@@ -238,15 +241,15 @@ func loadDiffWork(dir string, names []string, skip map[string]bool) (map[string]
 		if !ok {
 			continue
 		}
-		if streamBudget -= df.countBytes; streamBudget < 0 {
-			streamBudget = 0
-		}
 		if df.lines != nil {
 			if kept+df.bytes > diffMaxKeepTotalBytes {
-				df.toCounts(skip)
+				df.toCounts(skip, streamBudget)
 			} else {
 				kept += df.bytes
 			}
+		}
+		if streamBudget -= df.countBytes; streamBudget < 0 {
+			streamBudget = 0
 		}
 		out[name] = df
 	}
@@ -456,10 +459,25 @@ func pairHunkLines(a, b []string, rm, ad []int) []hunkPair {
 		return pairs
 	}
 	sims := make([][]float64, len(rm))
-	for i, ai := range rm {
+	for i := range sims {
 		sims[i] = make([]float64, len(ad))
-		for j, bi := range ad {
-			sims[i][j] = sim(a[ai], b[bi])
+	}
+	// Fill the matrix in two passes so the cell budget is spread across
+	// distinct removed lines: positional (diagonal) candidates first, then
+	// the remaining pairs by cycling column offset. Row-first filling could
+	// otherwise spend the whole budget on one removed line's candidates and
+	// leave every other line's likely match uncomputed.
+	diag := min(len(rm), len(ad))
+	for i := 0; i < diag; i++ {
+		sims[i][i] = sim(a[rm[i]], b[ad[i]])
+	}
+	for off := 1; off < len(ad); off++ {
+		for i := range rm {
+			j := (i + off) % len(ad)
+			if i < diag && j == i {
+				continue
+			}
+			sims[i][j] = sim(a[rm[i]], b[ad[j]])
 		}
 	}
 	usedR := make([]bool, len(rm))
@@ -636,6 +654,30 @@ func effLineCounts(lines []string, skip map[string]bool) map[string]int {
 		}
 	}
 	return counts
+}
+
+// boundedLineCounts counts effective lines, retaining at most budget bytes of
+// unique keys; unique lines beyond the budget count as overflow (weight, no
+// credit). Repeated lines are always counted. Retained keys are copied so
+// they do not pin the backing array of the (much larger) source file.
+func boundedLineCounts(lines []string, skip map[string]bool, budget int) (counts map[string]int, countBytes, overflow int) {
+	counts = map[string]int{}
+	for _, line := range lines {
+		key := effKey(line)
+		if key == "" || skip[key] {
+			continue
+		}
+		switch {
+		case counts[key] > 0:
+			counts[key]++
+		case len(key) <= budget-countBytes:
+			counts[string([]byte(key))] = 1
+			countBytes += len(key)
+		default:
+			overflow++
+		}
+	}
+	return counts, countBytes, overflow
 }
 
 // executeDiffRun is the built-in counterpart of executePlagRun: it compares
