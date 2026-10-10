@@ -833,6 +833,18 @@ func newFillCmd(a *app.App) *cobra.Command {
 			return a.FillPass()
 		},
 	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "enter [score]",
+		Args:  cobra.MaximumNArgs(1),
+		Short: "Fill blank entries on the active assignment with a score",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			score := ""
+			if len(args) == 1 {
+				score = args[0]
+			}
+			return a.FillScore(score)
+		},
+	})
 	return cmd
 }
 

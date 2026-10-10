@@ -2261,6 +2261,56 @@ func TestFillPassFillsBlankAndMissingEntries(t *testing.T) {
 	assertNotContains(t, show, "Bob Zhang  M")
 }
 
+func TestFillEnterFillsBlankAndMissingWithScore(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}, {"Bob", "Zhang", "3002"}, {"Carol", "Lin", "3003"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "Quiz\n10\nExam\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Quiz")
+
+	dbConn := openSeedDB(t, env)
+	defer dbConn.Close()
+	aliceID := studentIDByName(t, dbConn, "Alice", "Brown")
+	carolID := studentIDByName(t, dbConn, "Carol", "Lin")
+	if _, err := dbConn.Exec(`UPDATE grades SET score = NULL, flags_bitmask = 0 WHERE assignment_id = 1 AND student_pk = ?`, aliceID); err != nil {
+		t.Fatalf("clear alice grade to blank: %v", err)
+	}
+	if _, err := dbConn.Exec(`DELETE FROM grades WHERE assignment_id = 1 AND student_pk = ?`, carolID); err != nil {
+		t.Fatalf("delete carol grade row: %v", err)
+	}
+
+	out := mustRun(t, env, "", "fill", "enter", "8")
+	assertContains(t, out, "Filled 3 blank/missing grade(s) with 8.0")
+
+	show := mustRun(t, env, "", "show")
+	assertContains(t, show, "Alice Brown")
+	assertContains(t, show, "Carol Lin")
+	assertContains(t, show, "8.0")
+	assertNotContains(t, show, "Bob Zhang  M")
+}
+
+func TestFillEnterPromptsForScore(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Alice", "Brown", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "Quiz\n10\nExam\n", "assignments", "add")
+	mustRun(t, env, "", "use", "assignment", "Quiz")
+
+	out := mustRun(t, env, "8\n", "fill", "enter")
+	assertContains(t, out, "Score (max 10)")
+	assertContains(t, out, "Filled 1 blank/missing grade(s) with 8.0")
+}
+
 func TestLowScoreSetsRedoFlagForPassRateAssignments(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)
