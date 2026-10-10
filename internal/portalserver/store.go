@@ -133,6 +133,7 @@ func (s *Store) migrate() error {
 			status TEXT NOT NULL DEFAULT 'queued',
 			report_path TEXT NOT NULL DEFAULT '',
 			message TEXT NOT NULL DEFAULT '',
+			tool TEXT NOT NULL DEFAULT 'jplag',
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
 			finished_at TEXT
 		);`,
@@ -165,6 +166,10 @@ func (s *Store) migrate() error {
 	}
 	// Databases created before plagiarism run messages existed need the column added.
 	if err := s.addColumnIfMissing("sub_plag_runs", "message", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	// Databases created before the built-in diff check existed need the column added.
+	if err := s.addColumnIfMissing("sub_plag_runs", "tool", `TEXT NOT NULL DEFAULT 'jplag'`); err != nil {
 		return err
 	}
 	// Databases created before activity tracking existed need the column added.

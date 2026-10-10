@@ -479,11 +479,18 @@ export const adminDownloadSubmissionFile = (submissionId, name) => {
   });
 };
 
-export const adminRunPlagiarism = (assignmentId) =>
-  adminFetch(`/admin/submissions/assignments/${assignmentId}/plagiarism`, { method: 'POST' });
+// adminRunPlagiarism / adminGetPlagiarism operate on one plagiarism tool:
+// 'jplag' (default) or 'diff' (the built-in diff check).
+export const adminRunPlagiarism = (assignmentId, tool) =>
+  adminFetch(`/admin/submissions/assignments/${assignmentId}/plagiarism${tool ? `?tool=${tool}` : ''}`, { method: 'POST' });
 
-export const adminGetPlagiarism = (assignmentId) =>
-  adminFetch(`/admin/submissions/assignments/${assignmentId}/plagiarism`);
+export const adminGetPlagiarism = (assignmentId, tool) =>
+  adminFetch(`/admin/submissions/assignments/${assignmentId}/plagiarism${tool ? `?tool=${tool}` : ''}`);
+
+// adminGetPairDiff loads the side-by-side line diff of two students' latest
+// submissions for the diff-check view.
+export const adminGetPairDiff = (assignmentId, studentA, studentB) =>
+  adminFetch(`/admin/submissions/assignments/${assignmentId}/plagiarism/diff?a=${studentA}&b=${studentB}`);
 
 // adminDownloadPlagReport downloads the full JPlag report of the latest
 // finished run; the server picks the extension (.jplag for JPlag 6, .zip for

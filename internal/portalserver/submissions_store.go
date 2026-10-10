@@ -68,13 +68,15 @@ type SubTestRun struct {
 	FinishedAt   *string `json:"finishedAt"`
 }
 
-// SubPlagRun is one plagiarism-detection job for an assignment.
+// SubPlagRun is one plagiarism-detection job for an assignment. Tool is
+// "jplag" (external JPlag jar) or "diff" (built-in line/character diff check).
 type SubPlagRun struct {
 	ID           int64   `json:"id"`
 	AssignmentID int64   `json:"assignmentId"`
 	Status       string  `json:"status"`
 	ReportPath   string  `json:"reportPath"`
 	Message      string  `json:"message"`
+	Tool         string  `json:"tool"`
 	CreatedAt    string  `json:"createdAt"`
 	FinishedAt   *string `json:"finishedAt"`
 }
@@ -591,9 +593,10 @@ func (s *Store) StudentRunState(assignmentID int64, studentPK int) (lastQueued t
 	return lastQueued, active, nil
 }
 
-// CreateSubPlagRun inserts a queued plagiarism run and returns its id.
-func (s *Store) CreateSubPlagRun(assignmentID int64) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO sub_plag_runs(assignment_id) VALUES (?)`, assignmentID)
+// CreateSubPlagRun inserts a queued plagiarism run for the given tool
+// ("jplag" or "diff") and returns its id.
+func (s *Store) CreateSubPlagRun(assignmentID int64, tool string) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO sub_plag_runs(assignment_id, tool) VALUES (?, ?)`, assignmentID, tool)
 	if err != nil {
 		return 0, err
 	}
@@ -603,7 +606,7 @@ func (s *Store) CreateSubPlagRun(assignmentID int64) (int64, error) {
 // GetSubPlagRun returns the run, or nil if not found.
 func (s *Store) GetSubPlagRun(id int64) (*SubPlagRun, error) {
 	r, err := scanSubPlagRun(s.db.QueryRow(`
-		SELECT id, assignment_id, status, report_path, message, created_at, finished_at
+		SELECT id, assignment_id, status, report_path, message, tool, created_at, finished_at
 		FROM sub_plag_runs WHERE id = ?`, id))
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -614,11 +617,12 @@ func (s *Store) GetSubPlagRun(id int64) (*SubPlagRun, error) {
 	return r, nil
 }
 
-// LatestSubPlagRun returns the newest plagiarism run for an assignment, or nil.
-func (s *Store) LatestSubPlagRun(assignmentID int64) (*SubPlagRun, error) {
+// LatestSubPlagRun returns the newest plagiarism run of the given tool for an
+// assignment, or nil.
+func (s *Store) LatestSubPlagRun(assignmentID int64, tool string) (*SubPlagRun, error) {
 	r, err := scanSubPlagRun(s.db.QueryRow(`
-		SELECT id, assignment_id, status, report_path, message, created_at, finished_at
-		FROM sub_plag_runs WHERE assignment_id = ? ORDER BY id DESC LIMIT 1`, assignmentID))
+		SELECT id, assignment_id, status, report_path, message, tool, created_at, finished_at
+		FROM sub_plag_runs WHERE assignment_id = ? AND tool = ? ORDER BY id DESC LIMIT 1`, assignmentID, tool))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -631,7 +635,7 @@ func (s *Store) LatestSubPlagRun(assignmentID int64) (*SubPlagRun, error) {
 func scanSubPlagRun(row dbScanner) (*SubPlagRun, error) {
 	var r SubPlagRun
 	var finishedAt sql.NullString
-	err := row.Scan(&r.ID, &r.AssignmentID, &r.Status, &r.ReportPath, &r.Message, &r.CreatedAt, &finishedAt)
+	err := row.Scan(&r.ID, &r.AssignmentID, &r.Status, &r.ReportPath, &r.Message, &r.Tool, &r.CreatedAt, &finishedAt)
 	if err != nil {
 		return nil, err
 	}

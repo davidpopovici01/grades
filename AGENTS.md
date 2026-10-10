@@ -7,7 +7,7 @@ Guidance for AI agents and contributors working in this repository.
 `grades` is a teacher's gradebook tool:
 
 - **CLI** (`main.go`, `cmd/`, `internal/app`, `internal/db`): interactive terminal app for tracking grades, terms, and course years. SQLite via `modernc.org/sqlite` (pure Go, no CGO).
-- **Portal server** (`cmd/portal`, `internal/portalserver`): HTTP server students use to see grades, download materials, and upload code submissions (Python/Java, graded by harnesses, JPlag plagiarism checks).
+- **Portal server** (`cmd/portal`, `internal/portalserver`): HTTP server students use to see grades, download materials, and upload code submissions (Python/Java, graded by harnesses, plagiarism checks via JPlag plus a built-in pure-Go diff check).
 - **Portal frontend** (`portal-web`): React 19 + Vite + Tailwind SPA, built to `portal-web/dist` and served as static files by the portal server.
 
 ## Workflow rules

@@ -61,7 +61,7 @@ func (g *Grader) run() {
 			if job.testRunID != 0 {
 				g.executeTestRun(job.testRunID)
 			} else if job.plagRunID != 0 {
-				g.executePlagRun(job.plagRunID)
+				g.executePlagJob(job.plagRunID)
 			}
 			g.running.Add(-1)
 		case <-g.stop:
@@ -76,6 +76,17 @@ func (g *Grader) close() {
 	default:
 		close(g.stop)
 	}
+}
+
+// executePlagJob dispatches a plagiarism run to the engine named by its tool:
+// the built-in diff check or the external JPlag jar.
+func (g *Grader) executePlagJob(runID int64) {
+	run, err := g.store.GetSubPlagRun(runID)
+	if err == nil && run != nil && run.Tool == "diff" {
+		g.executeDiffRun(runID)
+		return
+	}
+	g.executePlagRun(runID)
 }
 
 // enqueueTest adds a test run to the queue; false when the queue is full.

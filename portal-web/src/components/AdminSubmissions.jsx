@@ -258,7 +258,8 @@ export function AdminSubmissions() {
                   </select>
                   {(form.language === 'text' || form.language === 'files') && (
                     <p className="text-xs text-gray-400 mt-1">
-                      No automated tests{form.language === 'files' ? ' or plagiarism detection' : ''} for this type.
+                      No automated tests for this type.
+                      {form.language === 'files' ? ' Plagiarism detection uses the built-in diff check (JPlag unavailable).' : ''}
                     </p>
                   )}
                 </div>
