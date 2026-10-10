@@ -174,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/admin/submissions/assignments/{id}/run", s.adminAuth(s.handleAdminSubRun))
 	mux.HandleFunc("/api/admin/submissions/assignments/{id}/plagiarism", s.adminAuth(s.handleAdminSubPlagiarism))
 	mux.HandleFunc("/api/admin/submissions/assignments/{id}/plagiarism/report", s.adminAuth(s.handleAdminSubPlagReport))
+	mux.HandleFunc("/api/admin/submissions/assignments/{id}/plagiarism/diff", s.adminAuth(s.handleAdminSubPlagPairDiff))
 	mux.HandleFunc("/api/admin/submissions/assignments/{id}/download", s.adminAuth(s.handleAdminSubAssignmentDownload))
 	mux.HandleFunc("/api/admin/submissions/submissions/{id}", s.adminAuth(s.handleAdminSubSubmissionDetail))
 	mux.HandleFunc("/api/admin/submissions/submissions/{id}/files/{name}", s.adminAuth(s.handleAdminSubSubmissionFile))

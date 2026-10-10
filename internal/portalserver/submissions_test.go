@@ -1618,7 +1618,7 @@ func TestSubStoreCRUD(t *testing.T) {
 	}
 
 	// Plagiarism runs and pairs.
-	plagID, err := store.CreateSubPlagRun(id)
+	plagID, err := store.CreateSubPlagRun(id, "jplag")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1628,13 +1628,25 @@ func TestSubStoreCRUD(t *testing.T) {
 	if err := store.SetSubPlagRunStatus(plagID, "done", "/tmp/report", ""); err != nil {
 		t.Fatal(err)
 	}
-	plag, err := store.LatestSubPlagRun(id)
-	if err != nil || plag == nil || plag.Status != "done" || plag.ReportPath != "/tmp/report" || plag.FinishedAt == nil {
+	plag, err := store.LatestSubPlagRun(id, "jplag")
+	if err != nil || plag == nil || plag.Status != "done" || plag.ReportPath != "/tmp/report" || plag.FinishedAt == nil || plag.Tool != "jplag" {
 		t.Fatalf("plag run: %+v %v", plag, err)
 	}
 	pairs, err := store.ListSubPlagPairs(plagID)
 	if err != nil || len(pairs) != 1 || pairs[0].Similarity != 0.95 {
 		t.Fatalf("pairs: %+v %v", pairs, err)
+	}
+
+	// Runs of different tools are tracked independently.
+	diffID, err := store.CreateSubPlagRun(id, "diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest, err := store.LatestSubPlagRun(id, "jplag"); err != nil || latest == nil || latest.ID != plagID {
+		t.Fatalf("latest jplag run: %+v %v", latest, err)
+	}
+	if latest, err := store.LatestSubPlagRun(id, "diff"); err != nil || latest == nil || latest.ID != diffID || latest.Tool != "diff" {
+		t.Fatalf("latest diff run: %+v %v", latest, err)
 	}
 
 	// Delete cascades to every child table.
@@ -1653,10 +1665,142 @@ func TestSubStoreCRUD(t *testing.T) {
 	if runs, err := store.RunsForSubmission(sub2.ID); err != nil || len(runs) != 0 {
 		t.Fatalf("runs after delete: %v %v", runs, err)
 	}
-	if plag, err := store.LatestSubPlagRun(id); err != nil || plag != nil {
+	if plag, err := store.LatestSubPlagRun(id, "jplag"); err != nil || plag != nil {
 		t.Fatalf("plag run after delete: %+v %v", plag, err)
 	}
 	if pairs, err := store.ListSubPlagPairs(plagID); err != nil || len(pairs) != 0 {
 		t.Fatalf("pairs after delete: %v %v", pairs, err)
+	}
+}
+
+// TestAdminDiffCheckFlow covers the built-in diff check: queueing a run,
+// pairwise similarity results, and the side-by-side pair diff endpoint.
+func TestAdminDiffCheckFlow(t *testing.T) {
+	server, handler, cookies := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, nil)
+
+	// Unknown tools are rejected before anything is queued.
+	rec := adminRequest(t, handler, http.MethodPost,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/plagiarism?tool=bogus", assignmentID), nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown tool: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := uploadSubmission(t, handler, cookies, assignmentID,
+		map[string]string{"main.py": "print(1)\nprint(2)\n"}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("john upload: %d", rec.Code)
+	}
+	jane := studentCookies(t, server, 2, "jane.doe")
+	if rec := uploadSubmission(t, handler, jane, assignmentID,
+		map[string]string{"main.py": "print(1)\nprint(3)\n"}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("jane upload: %d", rec.Code)
+	}
+
+	rec = adminRequest(t, handler, http.MethodPost,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/plagiarism?tool=diff", assignmentID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("diff queue: %d %s", rec.Code, rec.Body.String())
+	}
+	var queueResp struct {
+		RunID int64 `json:"runId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &queueResp); err != nil {
+		t.Fatal(err)
+	}
+
+	// The diff check runs in-process; wait for the worker to finish it.
+	deadline := time.Now().Add(10 * time.Second)
+	var run *SubPlagRun
+	for time.Now().Before(deadline) {
+		var err error
+		run, err = server.store.GetSubPlagRun(queueResp.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Status != "queued" && run.Status != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if run == nil || run.Status != "done" || run.Tool != "diff" || run.ReportPath != "" {
+		t.Fatalf("diff run = %+v, want done tool=diff with no report", run)
+	}
+
+	// GET for the diff tool returns the pair; the jplag view stays untouched.
+	rec = adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/plagiarism?tool=diff", assignmentID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("diff get: %d %s", rec.Code, rec.Body.String())
+	}
+	var getResp struct {
+		Run   *SubPlagRun `json:"run"`
+		Pairs []struct {
+			StudentA   int     `json:"studentA"`
+			StudentB   int     `json:"studentB"`
+			Similarity float64 `json:"similarity"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
+		t.Fatal(err)
+	}
+	if getResp.Run == nil || getResp.Run.Tool != "diff" || len(getResp.Pairs) != 1 {
+		t.Fatalf("diff get: %s", rec.Body.String())
+	}
+	pair := getResp.Pairs[0]
+	// One identical line (full credit) + one line with a single changed
+	// character (7/8 credit): (1 + 0.875) / 2.
+	if want := (1.0 + 0.875) / 2; pair.StudentA != 1 || pair.StudentB != 2 || pair.Similarity != want {
+		t.Fatalf("pair: %+v, want students 1/2 similarity %v", pair, want)
+	}
+	rec = adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/plagiarism", assignmentID), nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"run":null`) {
+		t.Fatalf("jplag view after diff run: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The pair diff endpoint aligns the two submissions line by line.
+	rec = adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/plagiarism/diff?a=1&b=2", assignmentID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pair diff: %d %s", rec.Code, rec.Body.String())
+	}
+	var diffResp struct {
+		NameA string `json:"nameA"`
+		NameB string `json:"nameB"`
+		Files []struct {
+			Name       string  `json:"name"`
+			Similarity float64 `json:"similarity"`
+			TooLarge   bool    `json:"tooLarge"`
+			Rows       []struct {
+				Tag    string `json:"tag"`
+				Left   string `json:"left"`
+				Right  string `json:"right"`
+				LeftNo int    `json:"leftNo"`
+			} `json:"rows"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &diffResp); err != nil {
+		t.Fatal(err)
+	}
+	if diffResp.NameA != "John Doe" || diffResp.NameB != "Jane Doe" || len(diffResp.Files) != 1 {
+		t.Fatalf("pair diff body: %s", rec.Body.String())
+	}
+	file := diffResp.Files[0]
+	if file.Name != "main.py" || len(file.Rows) != 2 ||
+		file.Rows[0].Tag != "same" || file.Rows[1].Tag != "changed" ||
+		file.Rows[1].Left != "print(2)" || file.Rows[1].Right != "print(3)" {
+		t.Fatalf("pair diff file: %+v", file)
+	}
+
+	// Bad ids and students without a submission are rejected.
+	rec = adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/plagiarism/diff?a=1&b=1", assignmentID), nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("same student: %d", rec.Code)
+	}
+	rec = adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/plagiarism/diff?a=1&b=999", assignmentID), nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("missing submission: %d", rec.Code)
 	}
 }

@@ -69,6 +69,8 @@ export function AdminAssignmentDetail() {
   const [students, setStudents] = useState(null);
   const [queue, setQueue] = useState(null);
   const [plag, setPlag] = useState(null);
+  const [diffPlag, setDiffPlag] = useState(null);
+  const [plagTool, setPlagTool] = useState('jplag');
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -145,8 +147,16 @@ export function AdminAssignmentDetail() {
 
   const loadPlagiarism = useCallback(
     () =>
-      adminGetPlagiarism(assignmentId)
+      adminGetPlagiarism(assignmentId, 'jplag')
         .then((data) => setPlag(data || null))
+        .catch(() => {}),
+    [assignmentId]
+  );
+
+  const loadDiffPlag = useCallback(
+    () =>
+      adminGetPlagiarism(assignmentId, 'diff')
+        .then((data) => setDiffPlag(data || null))
         .catch(() => {}),
     [assignmentId]
   );
@@ -172,12 +182,12 @@ export function AdminAssignmentDetail() {
       navigate('/admin/login');
       return;
     }
-    Promise.all([loadAssignment(), loadStudents(), loadPlagiarism(), loadSample(), loadBasecode()]).catch((err) => {
+    Promise.all([loadAssignment(), loadStudents(), loadPlagiarism(), loadDiffPlag(), loadSample(), loadBasecode()]).catch((err) => {
       if (handleAuthError(err)) return;
       setLoadFailed(true);
       setError(err.message);
     });
-  }, [navigate, loadAssignment, loadStudents, loadPlagiarism, loadSample, loadBasecode, handleAuthError]);
+  }, [navigate, loadAssignment, loadStudents, loadPlagiarism, loadDiffPlag, loadSample, loadBasecode, handleAuthError]);
 
   useEffect(() => {
     adminListCourses()
@@ -200,6 +210,7 @@ export function AdminAssignmentDetail() {
           }
           if (queueWasActive.current && !active) {
             loadPlagiarism();
+            loadDiffPlag();
             // Final refresh of any open submission details now that the
             // queue has drained.
             refreshExpanded(
@@ -216,7 +227,7 @@ export function AdminAssignmentDetail() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [loadStudents, loadPlagiarism, refreshExpanded]);
+  }, [loadStudents, loadPlagiarism, loadDiffPlag, refreshExpanded]);
 
   // While an expanded submission detail has queued/running test runs, poll it
   // every 3 s until all of its runs reach a terminal state.
@@ -232,13 +243,17 @@ export function AdminAssignmentDetail() {
     return () => clearInterval(timer);
   }, [expanded, refreshExpanded]);
 
-  // While a plagiarism run is queued/running, poll its status.
-  const plagStatus = plag?.run?.status;
+  // While a plagiarism run of either tool is queued/running, poll its status.
+  const plagRunning = plag?.run?.status === 'queued' || plag?.run?.status === 'running';
+  const diffRunning = diffPlag?.run?.status === 'queued' || diffPlag?.run?.status === 'running';
   useEffect(() => {
-    if (plagStatus !== 'queued' && plagStatus !== 'running') return undefined;
-    const timer = setInterval(() => loadPlagiarism(), 4000);
+    if (!plagRunning && !diffRunning) return undefined;
+    const timer = setInterval(() => {
+      loadPlagiarism();
+      loadDiffPlag();
+    }, 4000);
     return () => clearInterval(timer);
-  }, [plagStatus, loadPlagiarism]);
+  }, [plagRunning, diffRunning, loadPlagiarism, loadDiffPlag]);
 
   const uploadTest = () => {
     if (!testFile || !testName.trim()) {
@@ -467,14 +482,14 @@ export function AdminAssignmentDetail() {
       .catch((err) => setError(err.message));
   };
 
-  const startPlagiarism = () => {
+  const startPlagiarism = (tool) => {
     setPlagStarting(true);
     setError(null);
     setNotice(null);
-    adminRunPlagiarism(assignmentId)
+    adminRunPlagiarism(assignmentId, tool)
       .then(() => {
-        setNotice('Plagiarism check queued.');
-        return loadPlagiarism();
+        setNotice(tool === 'diff' ? 'Diff check queued.' : 'Plagiarism check queued.');
+        return tool === 'diff' ? loadDiffPlag() : loadPlagiarism();
       })
       .catch((err) => setError(err.message))
       .finally(() => setPlagStarting(false));
@@ -501,7 +516,12 @@ export function AdminAssignmentDetail() {
 
   const inputClass =
     'px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
-  const pairs = [...(plag?.pairs || [])].sort(
+  // JPlag is unavailable for generic file submissions; the diff check covers them.
+  const isFilesAssignment = assignment.language === 'files';
+  const activePlagTool = isFilesAssignment ? 'diff' : plagTool;
+  const activePlag = activePlagTool === 'diff' ? diffPlag : plag;
+  const activePlagStatus = activePlag?.run?.status;
+  const pairs = [...(activePlag?.pairs || [])].sort(
     (a, b) => similarityPercent(b.similarity) - similarityPercent(a.similarity)
   );
 
@@ -1002,30 +1022,54 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
           )}
         </div>
 
-        {assignment.language !== 'files' && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
-            <h2 className="font-semibold text-gray-800">Plagiarism Check</h2>
+            <div className="flex items-center gap-3">
+              <h2 className="font-semibold text-gray-800">Plagiarism Check</h2>
+              {!isFilesAssignment && (
+                <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-medium">
+                  <button
+                    onClick={() => setPlagTool('jplag')}
+                    className={`px-3 py-1.5 transition ${activePlagTool === 'jplag' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    JPlag
+                  </button>
+                  <button
+                    onClick={() => setPlagTool('diff')}
+                    className={`px-3 py-1.5 transition ${activePlagTool === 'diff' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Diff Check
+                  </button>
+                </div>
+              )}
+            </div>
             <button
-              onClick={startPlagiarism}
-              disabled={plagStarting || plagStatus === 'queued' || plagStatus === 'running'}
+              onClick={() => startPlagiarism(activePlagTool)}
+              disabled={plagStarting || activePlagStatus === 'queued' || activePlagStatus === 'running'}
               className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
             >
               {plagStarting
                 ? 'Queueing...'
-                : plagStatus === 'queued' || plagStatus === 'running'
-                  ? `Running (${plagStatus})...`
-                  : 'Run Plagiarism Check'}
+                : activePlagStatus === 'queued' || activePlagStatus === 'running'
+                  ? `Running (${activePlagStatus})...`
+                  : activePlagTool === 'diff'
+                    ? 'Run Diff Check'
+                    : 'Run Plagiarism Check'}
             </button>
           </div>
-          {plag?.run && (
+          {isFilesAssignment && (
+            <div className="px-6 py-2 border-b border-gray-100 text-xs text-gray-500">
+              JPlag is unavailable for generic file assignments; the built-in diff check compares them instead.
+            </div>
+          )}
+          {activePlag?.run && (
             <div className="px-6 py-3 border-b border-gray-100 text-xs text-gray-500">
-              Last run: {plag.run.status} · started {new Date(plag.run.createdAt).toLocaleString()}
-              {plag.run.finishedAt ? ` · finished ${new Date(plag.run.finishedAt).toLocaleString()}` : ''}
-              {plag.run.message && (
-                <div className="mt-1 text-amber-700">{plag.run.message}</div>
+              Last run: {activePlag.run.status} · started {new Date(activePlag.run.createdAt).toLocaleString()}
+              {activePlag.run.finishedAt ? ` · finished ${new Date(activePlag.run.finishedAt).toLocaleString()}` : ''}
+              {activePlag.run.message && (
+                <div className="mt-1 text-amber-700">{activePlag.run.message}</div>
               )}
-              {plag.run.status === 'done' && plag.run.reportPath && (
+              {activePlagTool === 'jplag' && activePlag.run.status === 'done' && activePlag.run.reportPath && (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <button
                     onClick={viewPlagReport}
@@ -1041,6 +1085,9 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                   </button>
                   <span>Side-by-side code comparisons open in a new tab.</span>
                 </div>
+              )}
+              {activePlagTool === 'diff' && activePlag.run.status === 'done' && pairs.length > 0 && (
+                <div className="mt-1">Click a pair below to open the side-by-side diff.</div>
               )}
             </div>
           )}
@@ -1131,7 +1178,13 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
           </div>
           {pairs.length === 0 ? (
             <div className="px-6 py-4 text-sm text-gray-400">
-              {plag?.run ? (plag.run.status === 'done' ? 'No similar pairs found.' : '') : 'No plagiarism run yet.'}
+              {activePlag?.run
+                ? activePlag.run.status === 'done'
+                  ? 'No similar pairs found.'
+                  : ''
+                : activePlagTool === 'diff'
+                  ? 'No diff check run yet.'
+                  : 'No plagiarism run yet.'}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1147,10 +1200,19 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                   {pairs.map((pair, idx) => {
                     const pct = similarityPercent(pair.similarity);
                     const hot = pct > 70;
+                    const clickable = activePlagTool === 'diff';
                     return (
                       <tr
                         key={`${pair.studentA}-${pair.studentB}-${idx}`}
-                        className={hot ? 'bg-red-50' : ''}
+                        className={`${hot ? 'bg-red-50' : ''} ${clickable ? 'cursor-pointer hover:bg-blue-50' : ''}`}
+                        onClick={
+                          clickable
+                            ? () =>
+                                navigate(
+                                  `/admin/submissions/${assignmentId}/plag-diff/${pair.studentA}/${pair.studentB}`
+                                )
+                            : undefined
+                        }
                       >
                         <td className={`px-6 py-3 ${hot ? 'text-red-700 font-medium' : 'text-gray-900'}`}>
                           {pair.nameA || pair.studentA}
@@ -1169,7 +1231,6 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
             </div>
           )}
         </div>
-        )}
       </main>
     </div>
   );

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1167,17 +1168,27 @@ func (s *Server) handleStudentSubmissionFile(w http.ResponseWriter, r *http.Requ
 	http.ServeFile(w, r, path)
 }
 
-// handleAdminSubPlagiarism queues (POST) or reports (GET) a JPlag run.
+// handleAdminSubPlagiarism queues (POST) or reports (GET) a plagiarism run.
+// The ?tool= query selects the engine: "jplag" (default, external jar) or
+// "diff" (built-in line/character diff check).
 func (s *Server) handleAdminSubPlagiarism(w http.ResponseWriter, r *http.Request) {
 	a := s.adminAssignment(w, r)
 	if a == nil {
 		return
 	}
+	tool := r.URL.Query().Get("tool")
+	if tool == "" {
+		tool = "jplag"
+	}
+	if tool != "jplag" && tool != "diff" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown plagiarism tool"})
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPost:
-		if a.Language == "files" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "plagiarism detection is not available for generic file submissions"})
+		if tool == "jplag" && a.Language == "files" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "JPlag is not available for generic file submissions; use the diff check"})
 			return
 		}
 		latest, err := s.store.LatestSubmissionsByAssignment(a.ID)
@@ -1189,7 +1200,7 @@ func (s *Server) handleAdminSubPlagiarism(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "need at least two students with submissions"})
 			return
 		}
-		runID, err := s.store.CreateSubPlagRun(a.ID)
+		runID, err := s.store.CreateSubPlagRun(a.ID, tool)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create plagiarism run"})
 			return
@@ -1201,7 +1212,7 @@ func (s *Server) handleAdminSubPlagiarism(w http.ResponseWriter, r *http.Request
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"runId": runID})
 	case http.MethodGet:
-		run, err := s.store.LatestSubPlagRun(a.ID)
+		run, err := s.store.LatestSubPlagRun(a.ID, tool)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load plagiarism run"})
 			return
@@ -1253,7 +1264,7 @@ func (s *Server) handleAdminSubPlagReport(w http.ResponseWriter, r *http.Request
 	if a == nil {
 		return
 	}
-	run, err := s.store.LatestSubPlagRun(a.ID)
+	run, err := s.store.LatestSubPlagRun(a.ID, "jplag")
 	if err != nil || run == nil || run.Status != "done" || run.ReportPath == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no finished plagiarism report"})
 		return
@@ -1279,6 +1290,128 @@ func (s *Server) handleAdminSubPlagReport(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("plag-report-assignment-%d-run-%d%s", a.ID, run.ID, ext)))
 	http.ServeFile(w, r, path)
+}
+
+// handleAdminSubPlagPairDiff serves the side-by-side line diff of two
+// students' latest submissions for the diff-check view. Rows are recomputed
+// on each request from the stored files with the same scoring rules
+// (base-code exclusion, binary/size caps) as a diff run.
+func (s *Server) handleAdminSubPlagPairDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	a := s.adminAssignment(w, r)
+	if a == nil {
+		return
+	}
+	pkA, errA := strconv.Atoi(r.URL.Query().Get("a"))
+	pkB, errB := strconv.Atoi(r.URL.Query().Get("b"))
+	if errA != nil || errB != nil || pkA <= 0 || pkB <= 0 || pkA == pkB {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "need two distinct student ids"})
+		return
+	}
+	latest, err := s.store.LatestSubmissionsByAssignment(a.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list submissions"})
+		return
+	}
+	subA, okA := latest[pkA]
+	subB, okB := latest[pkB]
+	if !okA || !okB {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "both students need a submission on this assignment"})
+		return
+	}
+
+	names := map[int]string{}
+	if roster, err := s.store.ListStudentsForCourse(a.CourseYearID, a.TermID); err == nil {
+		for _, st := range roster {
+			name := strings.TrimSpace(st.FirstName + " " + st.LastName)
+			if name == "" {
+				name = st.Username
+			}
+			names[st.StudentID] = name
+		}
+	}
+
+	skip := basecodeLineSet(basecodeDir(s.config.SubmissionsDir, a.ID))
+	filesA, err := s.loadDiffFiles(a.ID, subA)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read submission files"})
+		return
+	}
+	filesB, err := s.loadDiffFiles(a.ID, subB)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read submission files"})
+		return
+	}
+
+	nameSet := map[string]bool{}
+	for name := range filesA {
+		nameSet[name] = true
+	}
+	for name := range filesB {
+		nameSet[name] = true
+	}
+	fileNames := make([]string, 0, len(nameSet))
+	for name := range nameSet {
+		fileNames = append(fileNames, name)
+	}
+	sort.Strings(fileNames)
+
+	files := []map[string]any{}
+	for _, name := range fileNames {
+		linesA, inA := filesA[name]
+		linesB, inB := filesB[name]
+		res := diffAlign(linesA, linesB, skip)
+		similarity := 0.0
+		if w := res.weight(); w > 0 {
+			similarity = res.credit / w
+		}
+		onlyIn := ""
+		if !inA {
+			onlyIn = "b"
+		} else if !inB {
+			onlyIn = "a"
+		}
+		rows := res.rows
+		if res.tooLarge {
+			rows = nil
+		}
+		files = append(files, map[string]any{
+			"name":       name,
+			"similarity": similarity,
+			"tooLarge":   res.tooLarge,
+			"onlyIn":     onlyIn,
+			"rows":       rows,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nameA": names[pkA],
+		"nameB": names[pkB],
+		"files": files,
+	})
+}
+
+// loadDiffFiles reads one submission's text files for the diff view; binary
+// files are skipped.
+func (s *Server) loadDiffFiles(assignmentID int64, sub *SubSubmission) (map[string][]string, error) {
+	files, err := s.store.ListSubFiles(sub.ID)
+	if err != nil {
+		return nil, err
+	}
+	srcDir := submissionDir(s.config.SubmissionsDir, assignmentID, sub.StudentPK, sub.Attempt)
+	out := map[string][]string{}
+	for _, f := range files {
+		lines, ok, err := readDiffLines(filepath.Join(srcDir, f.Filename))
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out[f.Filename] = lines
+		}
+	}
+	return out, nil
 }
 
 // handleAdminSubQueue reports the grading queue depth.
