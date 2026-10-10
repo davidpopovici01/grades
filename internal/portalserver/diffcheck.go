@@ -40,16 +40,32 @@ const (
 	// diffMaxStreamLineBytes caps how much of one line is read when streaming
 	// an oversized file; longer lines are truncated for counting purposes.
 	diffMaxStreamLineBytes = 64 << 10
+	// diffMaxStreamCountBytes caps the total bytes of unique line keys
+	// retained per submission when streaming oversized files; unique lines
+	// beyond the budget add to the overflow weight only, so a huge upload of
+	// mostly-unique lines cannot exhaust the portal process's memory.
+	diffMaxStreamCountBytes = 8 << 20
+	// diffMaxHunkCells bounds the total Levenshtein matrix cells computed
+	// while pairing lines inside one changed hunk; once the budget is spent
+	// the remaining lines are left unpaired, so adversarial long-line uploads
+	// cannot stall the single grader worker.
+	diffMaxHunkCells = 32 << 20
 )
 
 // diffFile is one submission file prepared for diffing: either the kept lines
 // (alignment possible) or, for oversized content, only the effective line
-// multiset with tooLarge set (multiset scoring, no rendered rows).
+// multiset with tooLarge set (multiset scoring, no rendered rows). overflow
+// counts effective lines that were not retained in counts because the stream
+// budget ran out; they add scoring weight but can never earn credit.
+// countBytes approximates the retained key bytes of counts, for the
+// per-submission stream budget.
 type diffFile struct {
-	lines    []string
-	counts   map[string]int
-	tooLarge bool
-	bytes    int64
+	lines      []string
+	counts     map[string]int
+	overflow   int
+	countBytes int
+	tooLarge   bool
+	bytes      int64
 }
 
 // toCounts drops the kept lines in favor of their effective line multiset.
@@ -58,16 +74,18 @@ func (f *diffFile) toCounts(skip map[string]bool) {
 		return
 	}
 	f.counts = effLineCounts(f.lines, skip)
+	f.countBytes = int(f.bytes)
 	f.lines = nil
 	f.tooLarge = true
 }
 
-// effCounts returns the file's effective line multiset.
-func (f *diffFile) effCounts(skip map[string]bool) map[string]int {
+// effCounts returns the file's effective line multiset plus the count of
+// effective lines that overflowed the stream budget.
+func (f *diffFile) effCounts(skip map[string]bool) (counts map[string]int, overflow int) {
 	if f.counts != nil {
-		return f.counts
+		return f.counts, f.overflow
 	}
-	return effLineCounts(f.lines, skip)
+	return effLineCounts(f.lines, skip), 0
 }
 
 // diffRow is one aligned row of the side-by-side diff view. Tag is "same",
@@ -101,14 +119,15 @@ func (r diffResult) weight() float64 {
 // readDiffFile loads one submission file for diffing. Files with a NUL byte
 // in the first sniff bytes are binary and report ok=false. Files beyond
 // diffMaxKeepBytes or diffMaxKeepLines are streamed/reduced to their
-// effective line multiset (tooLarge) instead of being kept in full.
-func readDiffFile(path string, skip map[string]bool) (df *diffFile, ok bool, err error) {
+// effective line multiset (tooLarge) instead of being kept in full;
+// streamBudget bounds the unique line keys retained when streaming.
+func readDiffFile(path string, skip map[string]bool, streamBudget int) (df *diffFile, ok bool, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, false, err
 	}
 	if info.Size() > diffMaxKeepBytes {
-		return streamDiffFile(path, skip)
+		return streamDiffFile(path, skip, streamBudget)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -123,7 +142,12 @@ func readDiffFile(path string, skip map[string]bool) (df *diffFile, ok bool, err
 	}
 	lines := splitDiffLines(data)
 	if len(lines) > diffMaxKeepLines {
-		return &diffFile{counts: effLineCounts(lines, skip), tooLarge: true, bytes: info.Size()}, true, nil
+		return &diffFile{
+			counts:     effLineCounts(lines, skip),
+			countBytes: int(info.Size()),
+			tooLarge:   true,
+			bytes:      info.Size(),
+		}, true, nil
 	}
 	return &diffFile{lines: lines, bytes: info.Size()}, true, nil
 }
@@ -141,8 +165,11 @@ func splitDiffLines(data []byte) []string {
 
 // streamDiffFile counts the effective lines of an oversized text file without
 // holding it in memory. Lines longer than diffMaxStreamLineBytes are
-// truncated for counting. Binary files report ok=false.
-func streamDiffFile(path string, skip map[string]bool) (df *diffFile, ok bool, err error) {
+// truncated for counting. At most budget bytes of unique line keys are
+// retained; unique lines beyond the budget count toward overflow (weight but
+// no credit), keeping memory bounded for adversarial all-unique uploads.
+// Binary files report ok=false.
+func streamDiffFile(path string, skip map[string]bool, budget int) (df *diffFile, ok bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, false, err
@@ -155,6 +182,7 @@ func streamDiffFile(path string, skip map[string]bool) (df *diffFile, ok bool, e
 		return nil, false, nil
 	}
 	counts := map[string]int{}
+	var countBytes, overflow int
 	line := []byte{}
 	for {
 		frag, isPrefix, readErr := br.ReadLine()
@@ -166,7 +194,15 @@ func streamDiffFile(path string, skip map[string]bool) (df *diffFile, ok bool, e
 		}
 		if !isPrefix {
 			if key := string(bytes.TrimRight(line, " \t")); key != "" && !skip[key] {
-				counts[key]++
+				switch {
+				case counts[key] > 0:
+					counts[key]++
+				case len(key) <= budget-countBytes:
+					counts[key] = 1
+					countBytes += len(key)
+				default:
+					overflow++
+				}
 			}
 			line = line[:0]
 		}
@@ -182,22 +218,28 @@ func streamDiffFile(path string, skip map[string]bool) (df *diffFile, ok bool, e
 	if info != nil {
 		size = info.Size()
 	}
-	return &diffFile{counts: counts, tooLarge: true, bytes: size}, true, nil
+	return &diffFile{counts: counts, overflow: overflow, countBytes: countBytes, tooLarge: true, bytes: size}, true, nil
 }
 
 // loadDiffWork reads one submission's text files from dir, keeping at most
 // diffMaxKeepTotalBytes of file content in memory; content beyond the budget
-// is reduced to effective line counts. Binary files are skipped.
+// is reduced to effective line counts. Streamed line counts are likewise
+// bounded by diffMaxStreamCountBytes across the whole submission. Binary
+// files are skipped.
 func loadDiffWork(dir string, names []string, skip map[string]bool) (map[string]*diffFile, error) {
 	out := map[string]*diffFile{}
 	var kept int64
+	streamBudget := diffMaxStreamCountBytes
 	for _, name := range names {
-		df, ok, err := readDiffFile(filepath.Join(dir, name), skip)
+		df, ok, err := readDiffFile(filepath.Join(dir, name), skip, streamBudget)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
 			continue
+		}
+		if streamBudget -= df.countBytes; streamBudget < 0 {
+			streamBudget = 0
 		}
 		if df.lines != nil {
 			if kept+df.bytes > diffMaxKeepTotalBytes {
@@ -235,7 +277,7 @@ func basecodeLineSet(dir string) map[string]bool {
 		if e.IsDir() {
 			continue
 		}
-		df, ok, err := readDiffFile(filepath.Join(dir, e.Name()), nil)
+		df, ok, err := readDiffFile(filepath.Join(dir, e.Name()), nil, diffMaxStreamCountBytes)
 		if err != nil || !ok {
 			continue
 		}
@@ -268,7 +310,9 @@ func compareDiffFiles(a, b *diffFile, skip map[string]bool) diffResult {
 		b = &diffFile{}
 	}
 	if a.tooLarge || b.tooLarge || len(a.lines)*len(b.lines) > diffAlignMaxCells {
-		credit, weightA, weightB := overlapScoreCounts(a.effCounts(skip), b.effCounts(skip))
+		countsA, overA := a.effCounts(skip)
+		countsB, overB := b.effCounts(skip)
+		credit, weightA, weightB := overlapScoreCounts(countsA, countsB, overA, overB)
 		return diffResult{credit: credit, weightA: weightA, weightB: weightB, tooLarge: true}
 	}
 	return diffAlign(a.lines, b.lines, skip)
@@ -281,7 +325,7 @@ func compareDiffFiles(a, b *diffFile, skip map[string]bool) diffResult {
 // counts proportionally. skip lists scoring-excluded lines (base code).
 func diffAlign(a, b []string, skip map[string]bool) diffResult {
 	if len(a)*len(b) > diffAlignMaxCells {
-		credit, weightA, weightB := overlapScoreCounts(effLineCounts(a, skip), effLineCounts(b, skip))
+		credit, weightA, weightB := overlapScoreCounts(effLineCounts(a, skip), effLineCounts(b, skip), 0, 0)
 		return diffResult{credit: credit, weightA: weightA, weightB: weightB, tooLarge: true}
 	}
 
@@ -322,13 +366,16 @@ func (r *diffResult) appendHunk(a, b []string, rm, ad []int, skip map[string]boo
 	pairedR := map[int]bool{}
 	pairedA := map[int]bool{}
 	for _, p := range pairs {
-		pairedR[p[0]] = true
-		pairedA[p[1]] = true
-		left, right := a[p[0]], b[p[1]]
-		r.rows = append(r.rows, diffRow{Tag: "changed", Left: left, Right: right, LeftNo: p[0] + 1, RightNo: p[1] + 1})
+		pairedR[p.rm] = true
+		pairedA[p.ad] = true
+		left, right := a[p.rm], b[p.ad]
+		r.rows = append(r.rows, diffRow{Tag: "changed", Left: left, Right: right, LeftNo: p.rm + 1, RightNo: p.ad + 1})
 		effA, effB := lineEffective(left, skip), lineEffective(right, skip)
-		if effA || effB {
-			r.credit += lineCharSimilarity(left, right)
+		// Partial credit requires both lines to be effective: when one side
+		// is an exact base-code line, the pair still stems from shared
+		// starter code and must not count as similarity.
+		if effA && effB {
+			r.credit += p.sim
 		}
 		if effA {
 			r.weightA++
@@ -357,20 +404,53 @@ func (r *diffResult) appendHunk(a, b []string, rm, ad []int, skip map[string]boo
 	}
 }
 
+// hunkPair is a matched removed/added line pair with its character
+// similarity.
+type hunkPair struct {
+	rm  int
+	ad  int
+	sim float64
+}
+
 // pairHunkLines matches removed line indexes (into a) with added line
 // indexes (into b): greedy best character similarity first, or positional
 // pairing when the hunk exceeds the pair cap. Pairs below
 // diffMinPairSimilarity count as unrelated lines and are left unpaired.
-func pairHunkLines(a, b []string, rm, ad []int) [][2]int {
+// Character comparison work is bounded two ways: a cheap histogram upper
+// bound skips Levenshtein for pairs that cannot pass the threshold, and a
+// per-hunk cell budget (diffMaxHunkCells) stops pairing once spent.
+func pairHunkLines(a, b []string, rm, ad []int) []hunkPair {
 	if len(rm) == 0 || len(ad) == 0 {
 		return nil
 	}
+	budget := int64(diffMaxHunkCells)
+	// sim scores two lines by character similarity, or 0 when the pair
+	// provably cannot beat diffMinPairSimilarity or the hunk's cell budget
+	// is spent; both cases leave the lines unpaired either way.
+	sim := func(x, y string) float64 {
+		ra, rb := truncateRunes(x, diffMaxLineRunes), truncateRunes(y, diffMaxLineRunes)
+		if len(ra) == 0 || len(rb) == 0 {
+			if len(ra) == len(rb) {
+				return 1
+			}
+			return 0
+		}
+		if charSimUpperBound(ra, rb) <= diffMinPairSimilarity {
+			return 0
+		}
+		cells := int64(len(ra)) * int64(len(rb))
+		if cells > budget {
+			return 0
+		}
+		budget -= cells
+		return 1 - float64(levenshtein(ra, rb))/float64(max(len(ra), len(rb)))
+	}
 	if len(rm)*len(ad) > diffMaxHunkPairs {
 		n := min(len(rm), len(ad))
-		pairs := make([][2]int, 0, n)
+		pairs := make([]hunkPair, 0, n)
 		for k := 0; k < n; k++ {
-			if lineCharSimilarity(a[rm[k]], b[ad[k]]) > diffMinPairSimilarity {
-				pairs = append(pairs, [2]int{rm[k], ad[k]})
+			if s := sim(a[rm[k]], b[ad[k]]); s > diffMinPairSimilarity {
+				pairs = append(pairs, hunkPair{rm: rm[k], ad: ad[k], sim: s})
 			}
 		}
 		return pairs
@@ -379,12 +459,12 @@ func pairHunkLines(a, b []string, rm, ad []int) [][2]int {
 	for i, ai := range rm {
 		sims[i] = make([]float64, len(ad))
 		for j, bi := range ad {
-			sims[i][j] = lineCharSimilarity(a[ai], b[bi])
+			sims[i][j] = sim(a[ai], b[bi])
 		}
 	}
 	usedR := make([]bool, len(rm))
 	usedA := make([]bool, len(ad))
-	pairs := [][2]int{}
+	pairs := []hunkPair{}
 	for {
 		best, bi, bj := diffMinPairSimilarity, -1, -1
 		for i := range rm {
@@ -401,7 +481,7 @@ func pairHunkLines(a, b []string, rm, ad []int) [][2]int {
 			return pairs
 		}
 		usedR[bi], usedA[bj] = true, true
-		pairs = append(pairs, [2]int{rm[bi], ad[bj]})
+		pairs = append(pairs, hunkPair{rm: rm[bi], ad: ad[bj], sim: best})
 	}
 }
 
@@ -467,6 +547,26 @@ func lineCharSimilarity(a, b string) float64 {
 	return 1 - float64(dist)/float64(max(len(ra), len(rb)))
 }
 
+// charSimUpperBound is a cheap upper bound on lineCharSimilarity: the rune
+// histogram overlap of the two lines. Levenshtein distance is at least
+// maxLen - common (each alignment column either costs an edit or is an equal
+// match, and equal matches cannot exceed the histogram overlap), so the true
+// similarity never exceeds common/maxLen.
+func charSimUpperBound(ra, rb []rune) float64 {
+	counts := map[rune]int{}
+	for _, r := range ra {
+		counts[r]++
+	}
+	common := 0
+	for _, r := range rb {
+		if counts[r] > 0 {
+			counts[r]--
+			common++
+		}
+	}
+	return float64(common) / float64(max(len(ra), len(rb)))
+}
+
 // truncateRunes decodes at most n leading runes of s without materializing
 // the whole string, so a single huge line cannot exhaust memory.
 func truncateRunes(s string, n int) []rune {
@@ -511,14 +611,17 @@ func levenshtein(a, b []rune) int {
 
 // overlapScoreCounts is the fallback for file pairs too large to align:
 // credit counts lines shared as multisets, the weights are each side's
-// effective line count.
-func overlapScoreCounts(countA, countB map[string]int) (credit, weightA, weightB float64) {
+// effective line count. Overflow lines (not retained under the stream
+// budget) add to the weights but can never earn credit.
+func overlapScoreCounts(countA, countB map[string]int, overflowA, overflowB int) (credit, weightA, weightB float64) {
 	for _, c := range countA {
 		weightA += float64(c)
 	}
 	for _, c := range countB {
 		weightB += float64(c)
 	}
+	weightA += float64(overflowA)
+	weightB += float64(overflowB)
 	for line, ca := range countA {
 		credit += float64(min(ca, countB[line]))
 	}

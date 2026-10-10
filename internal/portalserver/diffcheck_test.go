@@ -117,6 +117,89 @@ func TestDiffAlignIgnoresBlankAndBasecode(t *testing.T) {
 	}
 }
 
+func TestDiffAlignBasecodeEditNoCredit(t *testing.T) {
+	// One side has an exact base-code line, the other a small edit of it:
+	// the common source is starter code, so the pair earns no credit even
+	// though the edited side carries weight.
+	a := []string{"template();"}
+	b := []string{"templateX();"}
+	skip := map[string]bool{"template();": true}
+	res := diffAlign(a, b, skip)
+	if res.credit != 0 {
+		t.Fatalf("credit = %v, want 0 for a base-code edit", res.credit)
+	}
+	if res.weightB != 1 || res.weightA != 0 {
+		t.Fatalf("weights = %v/%v, want 0/1", res.weightA, res.weightB)
+	}
+}
+
+func TestStreamDiffFileCountBudget(t *testing.T) {
+	// Unique line keys are retained only up to the byte budget; further
+	// unique lines count as overflow (weight, no credit), keeping memory
+	// bounded for huge all-unique uploads. Repeated lines are always counted.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	var sb strings.Builder
+	sb.WriteString("repeat\nrepeat\n") // 6-byte key, twice
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&sb, "unique-line-%08d\n", i) // 15-byte keys
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	df, ok, err := streamDiffFile(path, nil, 66) // room for "repeat" + 3 unique keys
+	if err != nil || !ok {
+		t.Fatalf("stream: ok=%v err=%v", ok, err)
+	}
+	if df.counts["repeat"] != 2 {
+		t.Fatalf("repeat count = %d, want 2", df.counts["repeat"])
+	}
+	if got := len(df.counts); got != 4 {
+		t.Fatalf("retained unique keys = %d, want 4 (repeat + 3)", got)
+	}
+	if df.overflow != 7 {
+		t.Fatalf("overflow = %d, want 7", df.overflow)
+	}
+
+	// Overflow adds weight but no credit, so an overflow-heavy pair scores
+	// low even against itself.
+	res := compareDiffFiles(df, df, nil)
+	wantWeight := float64(2 + 3 + 7)
+	if res.weight() != wantWeight {
+		t.Fatalf("weight = %v, want %v", res.weight(), wantWeight)
+	}
+	if res.credit != 5 {
+		t.Fatalf("credit = %v, want 5 (retained lines only)", res.credit)
+	}
+}
+
+func TestPairHunkLinesCellBudget(t *testing.T) {
+	// Long lines that pass the histogram prefilter each spend
+	// diffMaxLineRunes^2 cells; the per-hunk budget must stop pairing once
+	// spent, so adversarial long-line uploads cannot stall the worker.
+	pad := strings.Repeat("a", diffMaxLineRunes)
+	maxPairs := diffMaxHunkCells / (diffMaxLineRunes * diffMaxLineRunes)
+	n := maxPairs + 4
+	a, b := make([]string, n), make([]string, n)
+	rm, ad := make([]int, n), make([]int, n)
+	for i := 0; i < n; i++ {
+		a[i], b[i] = pad, pad
+		rm[i], ad[i] = i, i
+	}
+	if pairs := pairHunkLines(a, b, rm, ad); len(pairs) > maxPairs {
+		t.Fatalf("pairs = %d, want <= %d (cell budget)", len(pairs), maxPairs)
+	}
+
+	// Disjoint long lines never reach Levenshtein: the histogram upper bound
+	// already shows they cannot pass the threshold.
+	for i := 0; i < n; i++ {
+		b[i] = strings.Repeat("b", diffMaxLineRunes)
+	}
+	if pairs := pairHunkLines(a, b, rm, ad); len(pairs) != 0 {
+		t.Fatalf("disjoint long lines: pairs = %d, want 0", len(pairs))
+	}
+}
+
 func TestDiffAlignTooLarge(t *testing.T) {
 	// Beyond the cell cap the engine falls back to multiset overlap and
 	// reports no row alignment.
@@ -144,7 +227,7 @@ func TestReadDiffFile(t *testing.T) {
 	if err := os.WriteFile(text, []byte("a\r\nb\rc\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	df, ok, err := readDiffFile(text, nil)
+	df, ok, err := readDiffFile(text, nil, diffMaxStreamCountBytes)
 	if err != nil || !ok {
 		t.Fatalf("read text: ok=%v err=%v", ok, err)
 	}
@@ -156,7 +239,7 @@ func TestReadDiffFile(t *testing.T) {
 	if err := os.WriteFile(binary, []byte{'a', 0, 'b'}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := readDiffFile(binary, nil); err != nil || ok {
+	if _, ok, err := readDiffFile(binary, nil, diffMaxStreamCountBytes); err != nil || ok {
 		t.Fatalf("read binary: ok=%v err=%v", ok, err)
 	}
 }
@@ -174,7 +257,7 @@ func TestReadDiffFileOversized(t *testing.T) {
 	if err := os.WriteFile(big, []byte(sb.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	df, ok, err := readDiffFile(big, nil)
+	df, ok, err := readDiffFile(big, nil, diffMaxStreamCountBytes)
 	if err != nil || !ok {
 		t.Fatalf("read big: ok=%v err=%v", ok, err)
 	}
