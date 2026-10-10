@@ -1804,3 +1804,242 @@ func TestAdminDiffCheckFlow(t *testing.T) {
 		t.Fatalf("missing submission: %d", rec.Code)
 	}
 }
+
+func TestAdminSubmissionsListTotalBytes(t *testing.T) {
+	_, handler, cookies := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, nil)
+
+	content := "print(1)"
+	if rec := uploadSubmission(t, handler, cookies, assignmentID,
+		map[string]string{"main.py": content}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := adminRequest(t, handler, http.MethodGet, "/api/admin/submissions/assignments", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Assignments []struct {
+			ID         int64 `json:"id"`
+			TotalBytes int64 `json:"totalBytes"`
+		} `json:"assignments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, a := range resp.Assignments {
+		if a.ID == assignmentID {
+			found = true
+			if a.TotalBytes != int64(len(content)) {
+				t.Fatalf("totalBytes = %d, want %d", a.TotalBytes, len(content))
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("assignment %d not in list: %s", assignmentID, rec.Body.String())
+	}
+}
+
+func TestAdminSubmissionsDisk(t *testing.T) {
+	_, handler, cookies := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, nil)
+
+	content := "print(1)"
+	if rec := uploadSubmission(t, handler, cookies, assignmentID,
+		map[string]string{"main.py": content}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := adminRequest(t, handler, http.MethodGet, "/api/admin/submissions/disk", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disk: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		FreeBytes        uint64 `json:"freeBytes"`
+		TotalBytes       uint64 `json:"totalBytes"`
+		SubmissionsBytes uint64 `json:"submissionsBytes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.FreeBytes == 0 {
+		t.Fatalf("freeBytes = 0, want > 0 (%s)", rec.Body.String())
+	}
+	if resp.TotalBytes < resp.FreeBytes {
+		t.Fatalf("totalBytes %d < freeBytes %d", resp.TotalBytes, resp.FreeBytes)
+	}
+	if resp.SubmissionsBytes != uint64(len(content)) {
+		t.Fatalf("submissionsBytes = %d, want %d", resp.SubmissionsBytes, len(content))
+	}
+
+	// No admin token: unauthorized.
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/submissions/disk", nil)
+	unauth := httptest.NewRecorder()
+	handler.ServeHTTP(unauth, req)
+	if unauth.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated disk: %d, want 401", unauth.Code)
+	}
+}
+
+func TestAdminClearAssignmentSubmissions(t *testing.T) {
+	server, handler, cookies := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, nil)
+	if rec := uploadTestFile(t, handler, assignmentID, "smoke", "public", "harness.py",
+		"print('PASS: ok')\n"); rec.Code != http.StatusOK {
+		t.Fatalf("upload test: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := uploadSubmission(t, handler, cookies, assignmentID,
+		map[string]string{"main.py": "print(1)"}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("john upload: %d %s", rec.Code, rec.Body.String())
+	}
+	janeCookies := studentCookies(t, server, 2, "jane.doe")
+	if rec := uploadSubmission(t, handler, janeCookies, assignmentID,
+		map[string]string{"main.py": "print(2)"}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("jane upload: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A queued test run and a plagiarism run with pairs must be cleaned up too.
+	johnSub, err := server.store.LatestSubSubmission(assignmentID, 1)
+	if err != nil || johnSub == nil {
+		t.Fatalf("john submission: %v", err)
+	}
+	tests, err := server.store.ListSubTests(assignmentID)
+	if err != nil || len(tests) != 1 {
+		t.Fatalf("list tests: %v %v", tests, err)
+	}
+	if _, err := server.store.CreateSubTestRun(&SubTestRun{
+		SubmissionID: johnSub.ID, TestID: tests[0].ID,
+		Visibility: tests[0].Visibility, TriggeredBy: "admin",
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	plagRunID, err := server.store.CreateSubPlagRun(assignmentID, "diff")
+	if err != nil {
+		t.Fatalf("create plag run: %v", err)
+	}
+	if err := server.store.ReplaceSubPlagPairs(plagRunID, []SubPlagPair{
+		{RunID: plagRunID, StudentA: 1, StudentB: 2, Similarity: 0.9},
+	}); err != nil {
+		t.Fatalf("create plag pairs: %v", err)
+	}
+
+	rec := adminRequest(t, handler, http.MethodDelete,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/submissions", assignmentID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", resp.Deleted)
+	}
+
+	subs, err := server.store.ListSubSubmissionsByAssignment(assignmentID)
+	if err != nil || len(subs) != 0 {
+		t.Fatalf("submissions after clear: %v %v", subs, err)
+	}
+	if files, err := server.store.ListSubFiles(johnSub.ID); err != nil || len(files) != 0 {
+		t.Fatalf("files after clear: %v %v", files, err)
+	}
+	if runs, err := server.store.RunsForSubmission(johnSub.ID); err != nil || len(runs) != 0 {
+		t.Fatalf("runs after clear: %v %v", runs, err)
+	}
+	if ids, err := server.store.SubPlagRunIDs(assignmentID); err != nil || len(ids) != 0 {
+		t.Fatalf("plag runs after clear: %v %v", ids, err)
+	}
+	if pairs, err := server.store.ListSubPlagPairs(plagRunID); err != nil || len(pairs) != 0 {
+		t.Fatalf("plag pairs after clear: %v %v", pairs, err)
+	}
+	for _, pk := range []int{1, 2} {
+		if _, err := os.Stat(submissionDir(server.config.SubmissionsDir, assignmentID, pk, 1)); !os.IsNotExist(err) {
+			t.Fatalf("attempt dir for student %d still exists: %v", pk, err)
+		}
+	}
+
+	// The assignment row, its tests, and the tests/ directory survive.
+	a, err := server.store.GetSubAssignment(assignmentID)
+	if err != nil || a == nil {
+		t.Fatalf("assignment gone after clear: %v", err)
+	}
+	if tests, err := server.store.ListSubTests(assignmentID); err != nil || len(tests) != 1 {
+		t.Fatalf("tests after clear: %v %v", tests, err)
+	}
+	if info, err := os.Stat(testsDir(server.config.SubmissionsDir, assignmentID)); err != nil || !info.IsDir() {
+		t.Fatalf("tests dir missing after clear: %v", err)
+	}
+
+	// Unknown assignment is a 404.
+	rec = adminRequest(t, handler, http.MethodDelete,
+		"/api/admin/submissions/assignments/9999/submissions", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("clear unknown assignment: %d, want 404", rec.Code)
+	}
+}
+
+func TestAdminDeleteSubmission(t *testing.T) {
+	server, handler, cookies := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, nil)
+
+	if rec := uploadSubmission(t, handler, cookies, assignmentID,
+		map[string]string{"main.py": "print(1)"}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("john upload: %d %s", rec.Code, rec.Body.String())
+	}
+	janeCookies := studentCookies(t, server, 2, "jane.doe")
+	if rec := uploadSubmission(t, handler, janeCookies, assignmentID,
+		map[string]string{"main.py": "print(2)"}, nil); rec.Code != http.StatusOK {
+		t.Fatalf("jane upload: %d %s", rec.Code, rec.Body.String())
+	}
+
+	johnSub, err := server.store.LatestSubSubmission(assignmentID, 1)
+	if err != nil || johnSub == nil {
+		t.Fatalf("john submission: %v", err)
+	}
+
+	rec := adminRequest(t, handler, http.MethodDelete,
+		fmt.Sprintf("/api/admin/submissions/submissions/%d", johnSub.ID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || !resp.OK {
+		t.Fatalf("delete response: %s", rec.Body.String())
+	}
+
+	if sub, err := server.store.GetSubSubmission(johnSub.ID); err != nil || sub != nil {
+		t.Fatalf("row after delete: %v %v", sub, err)
+	}
+	if files, err := server.store.ListSubFiles(johnSub.ID); err != nil || len(files) != 0 {
+		t.Fatalf("files after delete: %v %v", files, err)
+	}
+	if _, err := os.Stat(submissionDir(server.config.SubmissionsDir, assignmentID, 1, 1)); !os.IsNotExist(err) {
+		t.Fatalf("attempt dir still exists: %v", err)
+	}
+
+	// Jane's submission is untouched.
+	janeSub, err := server.store.LatestSubSubmission(assignmentID, 2)
+	if err != nil || janeSub == nil {
+		t.Fatalf("jane submission gone: %v", err)
+	}
+	if files, err := server.store.ListSubFiles(janeSub.ID); err != nil || len(files) != 1 {
+		t.Fatalf("jane files: %v %v", files, err)
+	}
+	if _, err := os.Stat(submissionDir(server.config.SubmissionsDir, assignmentID, 2, 1)); err != nil {
+		t.Fatalf("jane attempt dir missing: %v", err)
+	}
+
+	// Deleting again is a 404.
+	rec = adminRequest(t, handler, http.MethodDelete,
+		fmt.Sprintf("/api/admin/submissions/submissions/%d", johnSub.ID), nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("second delete: %d, want 404", rec.Code)
+	}
+}

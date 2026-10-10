@@ -198,6 +198,29 @@ func (s *Store) listSubAssignments(query string, args ...any) ([]SubAssignment, 
 	return assignments, rows.Err()
 }
 
+// SubAssignmentDiskUsage returns the total uploaded byte size per assignment,
+// summed from sub_files.
+func (s *Store) SubAssignmentDiskUsage() (map[int64]int64, error) {
+	rows, err := s.db.Query(`
+		SELECT s.assignment_id, COALESCE(SUM(f.byte_size), 0)
+		FROM sub_submissions s JOIN sub_files f ON f.submission_id = s.id
+		GROUP BY s.assignment_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	usage := map[int64]int64{}
+	for rows.Next() {
+		var assignmentID, total int64
+		if err := rows.Scan(&assignmentID, &total); err != nil {
+			return nil, err
+		}
+		usage[assignmentID] = total
+	}
+	return usage, rows.Err()
+}
+
 // DeleteSubAssignment removes an assignment and all its tests, submissions,
 // files, runs, and plagiarism results in one transaction.
 func (s *Store) DeleteSubAssignment(id int64) error {
@@ -218,6 +241,31 @@ func (s *Store) DeleteSubAssignment(id int64) error {
 	}
 	for _, stmt := range statements {
 		if _, err := tx.Exec(stmt, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DeleteSubAssignmentSubmissions removes every submission of an assignment —
+// its files, test runs, and the assignment's plagiarism runs and pairs — in
+// one transaction. The assignment, its tests, and sample/basecode stay.
+func (s *Store) DeleteSubAssignmentSubmissions(assignmentID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	statements := []string{
+		`DELETE FROM sub_plag_pairs WHERE run_id IN (SELECT id FROM sub_plag_runs WHERE assignment_id = ?)`,
+		`DELETE FROM sub_plag_runs WHERE assignment_id = ?`,
+		`DELETE FROM sub_test_runs WHERE submission_id IN (SELECT id FROM sub_submissions WHERE assignment_id = ?)`,
+		`DELETE FROM sub_files WHERE submission_id IN (SELECT id FROM sub_submissions WHERE assignment_id = ?)`,
+		`DELETE FROM sub_submissions WHERE assignment_id = ?`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.Exec(stmt, assignmentID); err != nil {
 			return err
 		}
 	}
@@ -377,6 +425,29 @@ func (s *Store) ListSubSubmissions(assignmentID int64, studentPK int) ([]SubSubm
 		SELECT id, assignment_id, student_pk, attempt, submitted_at, is_late, cap_percent
 		FROM sub_submissions WHERE assignment_id = ? AND student_pk = ? ORDER BY id DESC`,
 		assignmentID, studentPK)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	subs := []SubSubmission{}
+	for rows.Next() {
+		sub, err := scanSubSubmission(rows)
+		if err != nil {
+			return nil, err
+		}
+		subs = append(subs, *sub)
+	}
+	return subs, rows.Err()
+}
+
+// ListSubSubmissionsByAssignment returns all submissions of an assignment,
+// oldest first.
+func (s *Store) ListSubSubmissionsByAssignment(assignmentID int64) ([]SubSubmission, error) {
+	rows, err := s.db.Query(`
+		SELECT id, assignment_id, student_pk, attempt, submitted_at, is_late, cap_percent
+		FROM sub_submissions WHERE assignment_id = ? ORDER BY id`,
+		assignmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -601,6 +672,25 @@ func (s *Store) CreateSubPlagRun(assignmentID int64, tool string) (int64, error)
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// SubPlagRunIDs returns the ids of all plagiarism runs of an assignment.
+func (s *Store) SubPlagRunIDs(assignmentID int64) ([]int64, error) {
+	rows, err := s.db.Query(`SELECT id FROM sub_plag_runs WHERE assignment_id = ?`, assignmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // GetSubPlagRun returns the run, or nil if not found.

@@ -8,6 +8,7 @@ import {
   adminListSubAssignmentSubmissions,
   adminRunSubTests,
   adminGetSubmission,
+  adminDeleteSubmission,
   adminDownloadSubmissionFile,
   adminGetSubmissionFileText,
   adminGetSubTestFile,
@@ -470,6 +471,23 @@ export function AdminAssignmentDetail() {
           return next;
         });
       });
+  };
+
+  const deleteSubmission = (studentId, submissionId) => {
+    if (!window.confirm('Delete this submission? This removes the submission and its files and cannot be undone.')) return;
+    setError(null);
+    setNotice(null);
+    adminDeleteSubmission(submissionId)
+      .then(() => {
+        // Collapse the now-deleted expanded row, then refresh the grid.
+        setExpanded((prev) => {
+          const next = { ...prev };
+          delete next[studentId];
+          return next;
+        });
+        return loadStudents();
+      })
+      .catch((err) => setError(err.message));
   };
 
   const viewPlagReport = () => {
@@ -1015,7 +1033,10 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                             {detail === 'loading' ? (
                               <div className="text-sm text-gray-400">Loading...</div>
                             ) : (
-                              <SubmissionDetail detail={detail} />
+                              <SubmissionDetail
+                                detail={detail}
+                                onDelete={() => deleteSubmission(student.studentId, detail.submission?.id)}
+                              />
                             )}
                           </td>
                         </tr>
@@ -1242,7 +1263,7 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
   );
 }
 
-function SubmissionDetail({ detail }) {
+function SubmissionDetail({ detail, onDelete }) {
   const [downloadError, setDownloadError] = useState(null);
   const [viewing, setViewing] = useState({}); // name -> text content, true while loading
   const submission = detail?.submission || {};
@@ -1279,9 +1300,19 @@ function SubmissionDetail({ detail }) {
 
   return (
     <div className="space-y-3">
-      <div className="text-xs text-gray-500">
-        Submitted {submission.submittedAt ? new Date(submission.submittedAt).toLocaleString() : '—'}
-        {submission.isLate && ` · late (cap ${submission.capPercent}%)`}
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-gray-500">
+          Submitted {submission.submittedAt ? new Date(submission.submittedAt).toLocaleString() : '—'}
+          {submission.isLate && ` · late (cap ${submission.capPercent}%)`}
+        </div>
+        {onDelete && submission.id && (
+          <button
+            onClick={onDelete}
+            className="text-sm text-red-600 hover:text-red-700 font-medium"
+          >
+            Delete submission
+          </button>
+        )}
       </div>
 
       <div>
