@@ -1091,6 +1091,36 @@ func (a *App) PassStudentMakeup(studentID string) error {
 }
 
 func (a *App) FillPass() error {
+	return a.fillGrades(gradeEntry{Flags: flagPass}, "PASS")
+}
+
+func (a *App) FillScore(raw string) error {
+	ctx := a.context()
+	if ctx.AssignmentID == 0 || ctx.TermID == 0 || ctx.CourseYearID == 0 {
+		return errors.New("set year, term, course, and assignment first")
+	}
+	for {
+		if strings.TrimSpace(raw) == "" {
+			meta, err := a.assignmentScoreMeta(ctx.AssignmentID)
+			if err != nil {
+				return err
+			}
+			raw, err = a.prompt(fmt.Sprintf("Score (max %d)", meta.MaxPoints))
+			if err != nil {
+				return err
+			}
+		}
+		entry, err := parseGradeInput(raw)
+		if err != nil {
+			fmt.Fprintln(a.out, retryMessage(err.Error()))
+			raw = ""
+			continue
+		}
+		return a.fillGrades(entry, formatGradeValue(entry))
+	}
+}
+
+func (a *App) fillGrades(entry gradeEntry, label string) error {
 	ctx := a.context()
 	if ctx.AssignmentID == 0 || ctx.TermID == 0 || ctx.CourseYearID == 0 {
 		return errors.New("set year, term, course, and assignment first")
@@ -1110,12 +1140,12 @@ func (a *App) FillPass() error {
 				continue
 			}
 		}
-		if err := a.saveGrade(ctx.AssignmentID, student.ID, gradeEntry{Flags: flagPass}, prev); err != nil {
+		if err := a.saveGrade(ctx.AssignmentID, student.ID, entry, prev); err != nil {
 			return err
 		}
 		count++
 	}
-	fmt.Fprintf(a.out, "Filled %d blank/missing grade(s) with PASS\n", count)
+	fmt.Fprintf(a.out, "Filled %d blank/missing grade(s) with %s\n", count, label)
 	return nil
 }
 

@@ -168,6 +168,7 @@ grades enter -lastname
 grades show
 grades pass [student]
 grades fill pass
+grades fill enter [score]
 grades mark-late
 grades mark-late -undo
 grades mark-zero-redo
