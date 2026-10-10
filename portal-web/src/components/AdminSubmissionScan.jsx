@@ -9,8 +9,14 @@ import {
 } from '../api';
 import { formatSize, isViewable } from '../format';
 
-// fetchDetail loads a submission's file list plus the text of every viewable
-// file, cached per submission id so flipping back and forth is instant.
+// MAX_INLINE_BYTES caps automatic inline loading: larger viewable files (big
+// .txt/.csv/.json uploads allowed by generic-file assignments) require an
+// explicit click, so opening Scan Code never pulls hundreds of MB into <pre>s.
+const MAX_INLINE_BYTES = 512 * 1024;
+
+// fetchDetail loads a submission's file list plus the text of every reasonably
+// sized viewable file, cached per submission id so flipping back and forth is
+// instant.
 function fetchDetail(cache, submission) {
   if (!cache.has(submission.id)) {
     const promise = adminGetSubmission(submission.id)
@@ -19,9 +25,10 @@ function fetchDetail(cache, submission) {
         const files = data?.files || sub.files || [];
         const withText = await Promise.all(
           files.map(async (f) => {
-            if (!isViewable(f.name)) return { ...f, text: null };
+            if (!isViewable(f.name)) return { ...f, text: null, tooLarge: false };
+            if (f.size > MAX_INLINE_BYTES) return { ...f, text: null, tooLarge: true };
             const text = await adminGetSubmissionFileText(submission.id, f.name).catch(() => null);
-            return { ...f, text };
+            return { ...f, text, tooLarge: false };
           })
         );
         return { submission: sub, files: withText };
@@ -226,36 +233,72 @@ export function AdminSubmissionScan() {
           </div>
         ) : (
           detail.files.map((f) => (
-            <div key={f.name} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
-                <code className="text-sm text-gray-800 break-all">{f.name}</code>
-                <span className="text-xs text-gray-400">{formatSize(f.size)}</span>
-                <button
-                  onClick={() =>
-                    adminDownloadSubmissionFile(detail.submission.id, f.name).catch((err) =>
-                      setError(err.message)
-                    )
-                  }
-                  className="text-xs text-blue-600 hover:text-blue-700 font-medium ml-auto shrink-0"
-                >
-                  Download
-                </button>
-              </div>
-              {f.text !== null ? (
-                <pre className="overflow-x-auto text-xs p-4 whitespace-pre-wrap break-all font-mono text-gray-800">
-                  {f.text}
-                </pre>
-              ) : (
-                <div className="px-4 py-3 text-sm text-gray-400">
-                  {isViewable(f.name)
-                    ? 'Could not load this file inline — use Download.'
-                    : 'This file type cannot be viewed inline — use Download.'}
-                </div>
-              )}
-            </div>
+            <ScanFileCard
+              key={f.name}
+              submissionId={detail.submission.id}
+              file={f}
+              onError={setError}
+            />
           ))
         )}
       </main>
+    </div>
+  );
+}
+
+function ScanFileCard({ submissionId, file, onError }) {
+  const [text, setText] = useState(file.text);
+  const [loading, setLoading] = useState(false);
+  const viewable = isViewable(file.name);
+
+  const loadInline = () => {
+    setLoading(true);
+    adminGetSubmissionFileText(submissionId, file.name)
+      .then((t) => setText(t))
+      .catch((err) => onError(err.message))
+      .finally(() => setLoading(false));
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
+        <code className="text-sm text-gray-800 break-all">{file.name}</code>
+        <span className="text-xs text-gray-400">{formatSize(file.size)}</span>
+        <button
+          onClick={() =>
+            adminDownloadSubmissionFile(submissionId, file.name).catch((err) => onError(err.message))
+          }
+          className="text-xs text-blue-600 hover:text-blue-700 font-medium ml-auto shrink-0"
+        >
+          Download
+        </button>
+      </div>
+      {text !== null ? (
+        <pre className="overflow-x-auto text-xs p-4 whitespace-pre-wrap break-all font-mono text-gray-800">
+          {text}
+        </pre>
+      ) : (
+        <div className="px-4 py-3 text-sm text-gray-400 flex items-center gap-3">
+          {viewable ? (
+            file.tooLarge ? (
+              <>
+                <span>Large file — not loaded automatically.</span>
+                <button
+                  onClick={loadInline}
+                  disabled={loading}
+                  className="text-xs text-blue-600 hover:text-blue-700 font-medium disabled:opacity-40"
+                >
+                  {loading ? 'Loading...' : 'View Inline'}
+                </button>
+              </>
+            ) : (
+              'Could not load this file inline — use Download.'
+            )
+          ) : (
+            'This file type cannot be viewed inline — use Download.'
+          )}
+        </div>
+      )}
     </div>
   );
 }
