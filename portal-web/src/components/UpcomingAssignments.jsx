@@ -16,6 +16,21 @@ function dueInfo(dueAt) {
   return { text: `Due ${formatted} · ${rel}`, overdue: false };
 }
 
+function isOverdue(a) {
+  if (!a.dueAt) return false;
+  const t = Date.parse(a.dueAt);
+  return !isNaN(t) && t < Date.now();
+}
+
+function isComplete(a) {
+  if ((a.publicTestCount || 0) > 0) {
+    const passed = a.publicPassed || 0;
+    const failed = a.publicFailed || 0;
+    return passed + failed > 0 && failed === 0;
+  }
+  return !!a.latestSubmission;
+}
+
 function StatusBadge({ assignment, overdue }) {
   const sub = assignment.latestSubmission;
   const warn = overdue ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700';
@@ -72,6 +87,8 @@ function StatusBadge({ assignment, overdue }) {
 // UpcomingAssignments lists the selected course's open and testable
 // assignments (soonest due first) with submission/test status, so students
 // see what still needs doing and how their tests are doing in one place.
+// Assignments past their deadline drop off once finished: every public test
+// passed, or — for assignments without tests — submitted.
 export function UpcomingAssignments({ selectedCourseKey }) {
   const [courses, setCourses] = useState(null);
 
@@ -84,6 +101,7 @@ export function UpcomingAssignments({ selectedCourseKey }) {
   const course = resolveCourse(courses, selectedCourseKey);
   const assignments = (course?.assignments || [])
     .filter((a) => a.isOpen || (a.publicTestCount || 0) > 0)
+    .filter((a) => !isOverdue(a) || !isComplete(a))
     .sort((a, b) => {
       const ta = a.dueAt ? Date.parse(a.dueAt) : Infinity;
       const tb = b.dueAt ? Date.parse(b.dueAt) : Infinity;
