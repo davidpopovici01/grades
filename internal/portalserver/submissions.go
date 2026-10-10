@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -366,10 +367,17 @@ func (s *Server) handleAdminSubAssignments(w http.ResponseWriter, r *http.Reques
 				courseNames[[2]int{c.CourseYearID, c.TermID}] = c.CourseName
 			}
 		}
+		diskUsage, err := s.store.SubAssignmentDiskUsage()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to compute disk usage"})
+			return
+		}
 		out := []map[string]any{}
 		for i := range assignments {
 			a := &assignments[i]
-			out = append(out, adminAssignmentJSON(a, courseNames[[2]int{a.CourseYearID, a.TermID}]))
+			entry := adminAssignmentJSON(a, courseNames[[2]int{a.CourseYearID, a.TermID}])
+			entry["totalBytes"] = diskUsage[a.ID]
+			out = append(out, entry)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"assignments": out})
 	case http.MethodPost:
@@ -393,6 +401,34 @@ func (s *Server) handleAdminSubAssignments(w http.ResponseWriter, r *http.Reques
 	default:
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 	}
+}
+
+// handleAdminSubDisk reports free/total disk space of the submissions
+// filesystem and the total bytes held by submissions.
+func (s *Server) handleAdminSubDisk(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(s.config.SubmissionsDir, &st); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to stat disk"})
+		return
+	}
+	usage, err := s.store.SubAssignmentDiskUsage()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to compute disk usage"})
+		return
+	}
+	var submissionsBytes uint64
+	for _, total := range usage {
+		submissionsBytes += uint64(total)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"freeBytes":        st.Bavail * uint64(st.Bsize),
+		"totalBytes":       st.Blocks * uint64(st.Bsize),
+		"submissionsBytes": submissionsBytes,
+	})
 }
 
 // handleAdminSubAssignment handles GET/PUT/DELETE on one assignment.
@@ -820,8 +856,14 @@ func (s *Server) submissionJSON(sub *SubSubmission) (map[string]any, error) {
 }
 
 // handleAdminSubAssignmentSubmissions lists the roster with each student's
-// latest submission and summed results from the latest run per test.
+// latest submission and summed results from the latest run per test. DELETE
+// removes every submission of the assignment (rows and files) while keeping
+// the assignment, its tests, and sample/basecode.
 func (s *Server) handleAdminSubAssignmentSubmissions(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		s.handleAdminClearAssignmentSubmissions(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
@@ -888,6 +930,40 @@ func (s *Server) handleAdminSubAssignmentSubmissions(w http.ResponseWriter, r *h
 		students = append(students, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"students": students})
+}
+
+// handleAdminClearAssignmentSubmissions deletes all submissions of an
+// assignment: database rows (including plagiarism runs and pairs), attempt
+// directories, and the assignment's plagiarism workspaces and reports.
+// Drafts, tests, and sample/basecode are kept.
+func (s *Server) handleAdminClearAssignmentSubmissions(w http.ResponseWriter, r *http.Request) {
+	a := s.adminAssignment(w, r)
+	if a == nil {
+		return
+	}
+	subs, err := s.store.ListSubSubmissionsByAssignment(a.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list submissions"})
+		return
+	}
+	plagRunIDs, err := s.store.SubPlagRunIDs(a.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list plagiarism runs"})
+		return
+	}
+	if err := s.store.DeleteSubAssignmentSubmissions(a.ID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete submissions"})
+		return
+	}
+	for _, sub := range subs {
+		_ = os.RemoveAll(submissionDir(s.config.SubmissionsDir, a.ID, sub.StudentPK, sub.Attempt))
+	}
+	for _, runID := range plagRunIDs {
+		base := filepath.Join(s.config.SubmissionsDir, "plag", strconv.FormatInt(runID, 10))
+		_ = os.RemoveAll(base)
+		_ = os.Remove(base + ".jplag")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": len(subs)})
 }
 
 // handleAdminSubRun queues all tests (public and secret) against the latest
@@ -965,8 +1041,13 @@ func (s *Server) queueTestRun(submissionID int64, test SubTest, triggeredBy stri
 }
 
 // handleAdminSubSubmissionDetail returns a submission with files and runs,
-// including secret test output.
+// including secret test output. DELETE removes the submission's database rows
+// and files.
 func (s *Server) handleAdminSubSubmissionDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		s.handleAdminDeleteSubmission(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
@@ -994,6 +1075,28 @@ func (s *Server) handleAdminSubSubmissionDetail(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"submission": subJSON, "files": subJSON["files"], "runs": runs})
+}
+
+// handleAdminDeleteSubmission removes one submission's database rows and its
+// attempt directory. Plagiarism tables reference students, not submissions,
+// so no pair rows dangle.
+func (s *Server) handleAdminDeleteSubmission(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid submission id"})
+		return
+	}
+	sub, err := s.store.GetSubSubmission(id)
+	if err != nil || sub == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "submission not found"})
+		return
+	}
+	if err := s.store.DeleteSubSubmission(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete submission"})
+		return
+	}
+	_ = os.RemoveAll(submissionDir(s.config.SubmissionsDir, sub.AssignmentID, sub.StudentPK, sub.Attempt))
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // handleAdminSubSubmissionFile serves one uploaded file of a submission.

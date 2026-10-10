@@ -410,6 +410,18 @@ export const adminRunSubTests = (assignmentId, studentPk) =>
 export const adminGetSubmission = (submissionId) =>
   adminFetch(`/admin/submissions/submissions/${submissionId}`);
 
+export const adminSubmissionsDisk = () =>
+  adminFetch('/admin/submissions/disk');
+
+// adminClearSubAssignmentSubmissions deletes every student submission for the
+// assignment (DB rows and files) but keeps the assignment, tests, and basecode.
+export const adminClearSubAssignmentSubmissions = (id) =>
+  adminFetch(`/admin/submissions/assignments/${id}/submissions`, { method: 'DELETE' });
+
+// adminDeleteSubmission deletes one submission attempt (DB row and files).
+export const adminDeleteSubmission = (id) =>
+  adminFetch(`/admin/submissions/submissions/${id}`, { method: 'DELETE' });
+
 // adminGetSubmissionFileText fetches a submission file as text for inline viewing.
 export const adminGetSubmissionFileText = (submissionId, name) => {
   const token = sessionStorage.getItem('adminToken') || '';

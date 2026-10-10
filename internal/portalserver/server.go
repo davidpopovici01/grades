@@ -179,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/admin/submissions/submissions/{id}", s.adminAuth(s.handleAdminSubSubmissionDetail))
 	mux.HandleFunc("/api/admin/submissions/submissions/{id}/files/{name}", s.adminAuth(s.handleAdminSubSubmissionFile))
 	mux.HandleFunc("/api/admin/submissions/queue", s.adminAuth(s.handleAdminSubQueue))
+	mux.HandleFunc("/api/admin/submissions/disk", s.adminAuth(s.handleAdminSubDisk))
 
 	// Static files and SPA fallback. Unknown /api paths get a JSON 404 so the
 	// frontend never parses index.html as an API response.

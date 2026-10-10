@@ -6,6 +6,8 @@ import {
   adminCreateSubAssignment,
   adminUpdateSubAssignment,
   adminDeleteSubAssignment,
+  adminClearSubAssignmentSubmissions,
+  adminSubmissionsDisk,
 } from '../api';
 import { formatSize } from '../format';
 import { useCourseSelection } from '../hooks/useCourseSelection';
@@ -62,6 +64,7 @@ export function AdminSubmissions() {
   const [courses, setCourses] = useState(null);
   const { selectedKey, selected, setSelectedKey } = useCourseSelection(courses);
   const [assignments, setAssignments] = useState([]);
+  const [disk, setDisk] = useState(null);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -83,6 +86,10 @@ export function AdminSubmissions() {
   }
 
   const refresh = useCallback((course) => {
+    // Disk stats are informational; never let a failure break the list.
+    adminSubmissionsDisk()
+      .then((data) => setDisk(data || null))
+      .catch(() => setDisk(null));
     return adminListSubAssignments(course.courseYearId, course.termId)
       .then((data) => setAssignments(data?.assignments || []))
       .catch((err) => setError(err.message));
@@ -179,6 +186,18 @@ export function AdminSubmissions() {
       .catch((err) => setError(err.message));
   };
 
+  const clearSubmissions = (assignment) => {
+    if (!window.confirm(`Delete ALL student submissions for "${assignment.title}"? This removes every submission file and cannot be undone. The assignment itself is kept.`)) return;
+    setError(null);
+    setNotice(null);
+    adminClearSubAssignmentSubmissions(assignment.id)
+      .then((data) => {
+        setNotice(`Deleted ${data?.deleted ?? 0} submission(s) for "${assignment.title}".`);
+        return refresh(selected);
+      })
+      .catch((err) => setError(err.message));
+  };
+
   if (!courses) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -203,6 +222,13 @@ export function AdminSubmissions() {
         {notice && (
           <div className="text-sm text-green-700 bg-green-50 border border-green-200 px-3 py-2 rounded-lg">
             {notice}
+          </div>
+        )}
+
+        {disk && (
+          <div className="text-sm text-gray-500">
+            Submissions using {formatSize(disk.submissionsBytes || 0)}
+            {' · '}Disk free: {formatSize(disk.freeBytes || 0)} of {formatSize(disk.totalBytes || 0)}
           </div>
         )}
 
@@ -397,6 +423,8 @@ export function AdminSubmissions() {
                         ? assignment.expectedFilenames.length
                         : filenamesToText(assignment.expectedFilenames).split('\n').filter(Boolean).length}
                       {' file(s) required'}
+                      {typeof assignment.totalBytes === 'number' &&
+                        ` · ${formatSize(assignment.totalBytes)} total`}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -411,6 +439,12 @@ export function AdminSubmissions() {
                       className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"
                     >
                       Edit
+                    </button>
+                    <button
+                      onClick={() => clearSubmissions(assignment)}
+                      className="px-3 py-1.5 text-sm font-medium text-red-600 hover:text-red-700"
+                    >
+                      Clear submissions
                     </button>
                     <button
                       onClick={() => deleteAssignment(assignment)}
