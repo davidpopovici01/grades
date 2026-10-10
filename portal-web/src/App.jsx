@@ -15,6 +15,7 @@ import { AdminMaterials } from './components/AdminMaterials';
 import { AdminSubmissions } from './components/AdminSubmissions';
 import { AdminAssignmentDetail } from './components/AdminAssignmentDetail';
 import { AdminPlagPairDiff } from './components/AdminPlagPairDiff';
+import { AdminSubmissionScan } from './components/AdminSubmissionScan';
 import { AdminActivity } from './components/AdminActivity';
 import { Materials } from './components/Materials';
 import { Submissions } from './components/Submissions';
@@ -70,6 +71,7 @@ function App() {
         <Route path="/admin/materials" element={<AdminMaterials />} />
         <Route path="/admin/submissions" element={<AdminSubmissions />} />
         <Route path="/admin/submissions/:id" element={<AdminAssignmentDetail />} />
+        <Route path="/admin/submissions/:id/scan" element={<AdminSubmissionScan />} />
         <Route path="/admin/submissions/:id/plag-diff/:a/:b" element={<AdminPlagPairDiff />} />
         <Route path="/admin/activity" element={<AdminActivity />} />
 

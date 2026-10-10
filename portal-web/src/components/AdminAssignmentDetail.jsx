@@ -886,6 +886,12 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                   Queue: {queue.depth} queued · {queue.running} running
                 </span>
               )}
+              <Link
+                to={`/admin/submissions/${assignmentId}/scan`}
+                className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+              >
+                Scan Code
+              </Link>
               <button
                 onClick={loadStudents}
                 className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"
