@@ -27,6 +27,7 @@ type App struct {
 	configPath   string
 	dbPath       string
 	in           *bufio.Reader
+	stdinFile    *os.File
 	out          io.Writer
 	errOut       io.Writer
 }
@@ -109,6 +110,9 @@ func NewWithClass(in io.Reader, out, errOut io.Writer, class string) (*App, erro
 		in:         bufio.NewReader(in),
 		out:        out,
 		errOut:     errOut,
+	}
+	if f, ok := in.(*os.File); ok {
+		app.stdinFile = f
 	}
 
 	if class == "" {
