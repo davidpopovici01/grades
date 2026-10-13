@@ -589,9 +589,6 @@ func hasPendingRedo(record GradeRecord, passPercent sql.NullFloat64) bool {
 	if record.Flags&flagLocked0 != 0 {
 		return false
 	}
-	if !hasPassRate(passPercent) {
-		return false
-	}
 	if record.Flags&flagMissing != 0 {
 		return false
 	}
@@ -600,18 +597,20 @@ func hasPendingRedo(record GradeRecord, passPercent sql.NullFloat64) bool {
 	}
 	if record.Flags&flagRedo != 0 {
 		if !record.Score.Valid || record.MaxPoints <= 0 {
+			// An explicit redo with no new score is outstanding even when the
+			// category has no pass rate to judge a redone score against.
 			return true
+		}
+		if !hasPassRate(passPercent) {
+			return false
 		}
 		return (record.Score.Float64/float64(record.MaxPoints))*100 < passPercent.Float64
 	}
-	if !record.Score.Valid || record.MaxPoints <= 0 {
+	if !hasPassRate(passPercent) {
 		return false
 	}
-	if record.Score.Valid && record.MaxPoints > 0 && passPercent.Valid && passPercent.Float64 > 0 &&
-		(record.Score.Float64/float64(record.MaxPoints))*100 < passPercent.Float64 {
-		return true
-	}
-	return false
+	return record.Score.Valid && record.MaxPoints > 0 &&
+		(record.Score.Float64/float64(record.MaxPoints))*100 < passPercent.Float64
 }
 
 func isPassingNumericGrade(record GradeRecord, passPercent sql.NullFloat64) bool {
