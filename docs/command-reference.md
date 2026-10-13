@@ -13,6 +13,7 @@ grades students ...
 grades categories ...
 grades assignments ...
 grades enter
+grades rubric ...
 grades show
 grades pass
 grades fill ...
@@ -177,6 +178,26 @@ grades clear-late [student]
 grades clear-redo [student]
 grades clear-cheat [student]
 ```
+
+## Rubric Grading
+
+```powershell
+grades rubric link <file.docx>
+grades rubric          # same as: grades rubric enter
+grades rubric enter
+grades rubric list
+```
+
+`rubric link` parses a rubric DOCX (criteria rows are detected by the `____/N` blanks in the `Points` column), shows the parsed criteria, and links it to the active assignment. The template is stored in the database, so the original file is no longer needed afterwards.
+
+`rubric enter` grades students by name (same roster search as `grades enter`):
+
+- Students who already have a rubric are flagged, and their scores pre-fill for editing.
+- On a terminal, an interactive sheet opens: `↑`/`↓` move between criteria, `0`-`9` set the highlighted score, `l`/`r` toggle late/redo flags, `s` saves, `q`/`Esc` cancels. In a pipe, plain per-criterion prompts are used instead (Enter keeps the existing score).
+- The rubric total is recorded as the student's grade for the assignment (with the usual audit trail), and a filled, printable DOCX is written to `~/.grades/rubrics/<assignment-id>_<Assignment_Title>/<student-id>_<Last>_<First>.docx` (the IDs keep paths unique when assignments or students share names).
+- A linked rubric cannot be replaced once students have recorded rubric scores for that assignment.
+
+`rubric list` shows which roster students already have a rubric for the active assignment.
 
 ## Outstanding Work (Without Switching Assignments)
 

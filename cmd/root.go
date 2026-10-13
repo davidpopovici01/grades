@@ -70,6 +70,7 @@ func NewRootCmdWithClass(in io.Reader, out, errOut io.Writer, className string) 
 		newStudentsCmd(gradesApp),
 		newAssignmentsCmd(gradesApp),
 		newEnterCmd(gradesApp),
+		newRubricCmd(gradesApp),
 		newShowCmd(gradesApp),
 		newPassCmd(gradesApp),
 		newRedoCmd(gradesApp),
@@ -738,6 +739,41 @@ func newEnterCmd(a *app.App) *cobra.Command {
 			return a.EnterGradesInteractive(byLastName)
 		},
 	}
+}
+
+func newRubricCmd(a *app.App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rubric",
+		Short: "Grade the active assignment with a linked DOCX rubric",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.RubricEnter()
+		},
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "link <file.docx>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Link a rubric DOCX to the active assignment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.LinkRubric(args[0])
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "enter",
+		Args:  cobra.NoArgs,
+		Short: "Grade students with the linked rubric",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.RubricEnter()
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Args:  cobra.NoArgs,
+		Short: "Show which students already have a rubric for the active assignment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.RubricList()
+		},
+	})
+	return cmd
 }
 
 func newShowCmd(a *app.App) *cobra.Command {

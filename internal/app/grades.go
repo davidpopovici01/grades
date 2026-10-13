@@ -904,7 +904,7 @@ func (a *App) saveGrade(assignmentID, studentID int, entry gradeEntry, prev *Gra
 	if prev != nil && prev.Flags&flagLocked0 != 0 {
 		return errors.New("this grade is marked cheat and cannot be changed; use clear-cheat first")
 	}
-	if prev != nil && prev.Flags&flagLate != 0 && entry.Flags&flagLate == 0 {
+	if prev != nil && prev.Flags&flagLate != 0 && entry.Flags&flagLate == 0 && !entry.ClearLate {
 		entry.Flags |= flagLate
 	}
 	if redoEligible && prev != nil && prev.Flags&flagRedo != 0 && !entry.ClearRedo && entry.Flags&flagRedo == 0 {
