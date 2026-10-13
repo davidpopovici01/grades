@@ -17,14 +17,20 @@ function formatPercent(value) {
 // Mirrors the admin panel's pending logic (pendingAction in
 // internal/portalserver/handlers.go): missing/redo chips only show while they
 // still need action, and an unflagged failing score still gets a redo chip.
+// An explicit redo flag with no score stays visible even without a pass rate.
 function visibleFlags(a) {
   const flags = a.flags || [];
   const has = (f) => flags.includes(f);
   const pendingMissing = has('missing');
   let pendingRedo = false;
-  if (!pendingMissing && !has('cheat') && !has('pass') && a.passPercent > 0 && a.maxPoints > 0) {
-    const passing = a.score !== null && a.score !== undefined && (a.score / a.maxPoints) * 100 >= a.passPercent;
-    pendingRedo = has('redo') ? !passing : (a.score !== null && a.score !== undefined && !passing);
+  if (!pendingMissing && !has('cheat') && !has('pass')) {
+    const noScore = a.score === null || a.score === undefined;
+    if (has('redo') && (noScore || a.maxPoints <= 0)) {
+      pendingRedo = true;
+    } else if (a.passPercent > 0 && a.maxPoints > 0) {
+      const passing = !noScore && (a.score / a.maxPoints) * 100 >= a.passPercent;
+      pendingRedo = has('redo') ? !passing : (!noScore && !passing);
+    }
   }
   const display = flags.filter((f) => {
     if (f === 'missing') return pendingMissing;

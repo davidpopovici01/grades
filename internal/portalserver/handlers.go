@@ -280,7 +280,8 @@ type snapshotGrades struct {
 // pendingAction mirrors the CLI gradebook rules: a missing flag always means
 // missing (the CLI stores it as score 0 + flag), and redo is pending when the
 // score is missing or below the pass rate — including an unflagged failing
-// score (hasPendingRedo in grades.go).
+// score (hasPendingRedo in grades.go). An explicit redo flag with no score is
+// pending even when the category has no pass rate.
 func pendingAction(a snapshotAssignment) (missing, redo bool) {
 	cheat, passFlag, hasRedo := false, false, false
 	for _, f := range a.Flags {
@@ -300,6 +301,9 @@ func pendingAction(a snapshotAssignment) (missing, redo bool) {
 	}
 	if cheat || passFlag {
 		return false, false
+	}
+	if hasRedo && (a.Score == nil || a.MaxPoints <= 0) {
+		return false, true
 	}
 	if a.PassPercent == nil || *a.PassPercent <= 0 || a.MaxPoints <= 0 {
 		return false, false

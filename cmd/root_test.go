@@ -2635,6 +2635,40 @@ func TestOverviewSetAfterPersistsCutoff(t *testing.T) {
 	assertContains(t, overviewAfterClear, "Redo: HW1")
 }
 
+func TestExplicitRedoWithoutPassRateAppearsInOverviewAndMakeupList(t *testing.T) {
+	env := newTestEnv(t)
+	seedBaseData(t, env)
+	seedStudents(t, env, [][3]string{{"Harry", "Zhuo", "3001"}})
+
+	mustRun(t, env, "", "use", "year", "2026-27")
+	mustRun(t, env, "", "use", "term", "Fall 2026")
+	mustRun(t, env, "", "use", "course", "1")
+	mustRun(t, env, "", "use", "section", "12A")
+	mustRun(t, env, "PA2\n1\nExam\n", "assignments", "add")
+	// Raw scheme: the category has no pass rate, like Classwork in production.
+	mustRun(t, env, "", "categories", "set-scheme", "Exam", "average")
+	mustRun(t, env, "", "use", "assignment", "PA2")
+	mustRun(t, env, "har\nr\n\n", "grades", "enter")
+
+	overview := mustRun(t, env, "", "overview")
+	assertContains(t, overview, "Harry Zhuo")
+	assertContains(t, overview, "Redo: PA2")
+
+	redoList := mustRun(t, env, "", "redo", "list", "Harry")
+	assertContains(t, redoList, "Redo assignments for Harry Zhuo")
+	assertContains(t, redoList, "PA2")
+
+	makeupList := mustRun(t, env, "", "make-up", "list", "Harry")
+	assertContains(t, makeupList, "Make-up assignments for Harry Zhuo")
+	assertContains(t, makeupList, "PA2")
+
+	// A scored redo with no pass rate cannot be judged pass/fail, so it stays
+	// out of the outstanding-work lists.
+	mustRun(t, env, "har\n0.5r\n\n", "grades", "enter")
+	overviewAfter := mustRun(t, env, "", "overview")
+	assertNotContains(t, overviewAfter, "Redo: PA2")
+}
+
 func TestOverviewHidesQuizTestClassworkByDefault(t *testing.T) {
 	env := newTestEnv(t)
 	seedBaseData(t, env)

@@ -11,18 +11,21 @@ function rawPercent(a) {
 
 // A redo still needs attention unless the work was redone up to the pass rate.
 // The redo flag stays on the record after a redo, so the flag alone is not
-// enough — a passing score clears it.
+// enough — a passing score clears it. An explicit redo with no score is
+// pending even when the category has no pass rate.
 export function isPendingRedo(a) {
   const flags = a.flags || [];
   if (flags.includes('cheat')) return false;
   if (flags.includes('missing')) return false;
   if (flags.includes('pass')) return false;
-  const passRate = a.passPercent;
-  if (!passRate || passRate <= 0) return false;
   if (flags.includes('redo')) {
     if (!hasScore(a) || a.maxPoints <= 0) return true;
+    const passRate = a.passPercent;
+    if (!passRate || passRate <= 0) return false;
     return rawPercent(a) < passRate;
   }
+  const passRate = a.passPercent;
+  if (!passRate || passRate <= 0) return false;
   return hasScore(a) && a.maxPoints > 0 && rawPercent(a) < passRate;
 }
 
