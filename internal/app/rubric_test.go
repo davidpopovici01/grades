@@ -247,3 +247,80 @@ func TestRubricEnterWithoutLinkFails(t *testing.T) {
 		t.Fatalf("expected link guidance error, got %v", err)
 	}
 }
+
+func TestRubricLinkRejectedAfterScoresRecorded(t *testing.T) {
+	input := "y\n" +
+		"alice\n" +
+		"4\n5\n3\n4\n5\n4\n3\n4\n" +
+		"\n" +
+		"done\n" +
+		"y\n" // confirm the second link attempt
+	a, _ := setupRubricTestApp(t, input)
+	defer a.Close()
+
+	if err := a.LinkRubric(filepath.Join("testdata", "rubric.docx")); err != nil {
+		t.Fatalf("link rubric: %v", err)
+	}
+	if err := a.RubricEnter(); err != nil {
+		t.Fatalf("rubric enter: %v", err)
+	}
+	err := a.LinkRubric(filepath.Join("testdata", "rubric.docx"))
+	if err == nil || !strings.Contains(err.Error(), "already have recorded rubric scores") {
+		t.Fatalf("expected re-link rejection, got %v", err)
+	}
+}
+
+func TestRubricEnterClearsToggledOffFlags(t *testing.T) {
+	input := "y\n" +
+		"alice\n" +
+		"4\n5\n3\n4\n5\n4\n3\n4\n" +
+		"l\n" + // toggle late on
+		"\n" +
+		"alice\n" +
+		"\n\n\n\n\n\n\n\n" + // keep all scores
+		"l\n" + // toggle late back off
+		"\n" +
+		"done\n"
+	a, _ := setupRubricTestApp(t, input)
+	defer a.Close()
+
+	if err := a.LinkRubric(filepath.Join("testdata", "rubric.docx")); err != nil {
+		t.Fatalf("link rubric: %v", err)
+	}
+	if err := a.RubricEnter(); err != nil {
+		t.Fatalf("rubric enter: %v", err)
+	}
+
+	var flags int
+	if err := a.db.QueryRow(`SELECT flags_bitmask FROM grades WHERE assignment_id = 1 AND student_pk = 10`).Scan(&flags); err != nil {
+		t.Fatalf("query grade: %v", err)
+	}
+	if flags != 0 {
+		t.Fatalf("expected late flag cleared after toggling off, got flags %d", flags)
+	}
+}
+
+func TestRubricOutputPathIncludesIDs(t *testing.T) {
+	input := "y\n" +
+		"alice\n" +
+		"4\n5\n3\n4\n5\n4\n3\n4\n" +
+		"\n" +
+		"done\n"
+	a, _ := setupRubricTestApp(t, input)
+	defer a.Close()
+
+	if err := a.LinkRubric(filepath.Join("testdata", "rubric.docx")); err != nil {
+		t.Fatalf("link rubric: %v", err)
+	}
+	if err := a.RubricEnter(); err != nil {
+		t.Fatalf("rubric enter: %v", err)
+	}
+
+	var filePath string
+	if err := a.db.QueryRow(`SELECT file_path FROM rubric_scores WHERE assignment_id = 1 AND student_pk = 10`).Scan(&filePath); err != nil {
+		t.Fatalf("query rubric scores: %v", err)
+	}
+	if !strings.Contains(filePath, filepath.Join("rubrics", "1_Unit_1_Coding_Project", "10_Brown_Alice.docx")) {
+		t.Fatalf("expected path with assignment and student IDs, got %s", filePath)
+	}
+}

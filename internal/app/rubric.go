@@ -303,6 +303,20 @@ func (a *App) LinkRubric(path string) error {
 		return nil
 	}
 
+	existingRubric, err := a.loadLinkedRubric(ctx.AssignmentID)
+	if err != nil {
+		return err
+	}
+	if existingRubric != nil {
+		var scoreCount int
+		if err := a.db.QueryRow(`SELECT COUNT(*) FROM rubric_scores WHERE assignment_id = ?`, ctx.AssignmentID).Scan(&scoreCount); err != nil {
+			return err
+		}
+		if scoreCount > 0 {
+			return fmt.Errorf("cannot replace the rubric for %s: %d student(s) already have recorded rubric scores", meta.Title, scoreCount)
+		}
+	}
+
 	criteriaJSON, err := json.Marshal(rubric.Criteria)
 	if err != nil {
 		return err
@@ -476,12 +490,12 @@ func (a *App) RubricEnter() error {
 		if err != nil {
 			return err
 		}
-		flags := 0
+		prevFlags := 0
 		if prev != nil {
-			flags = prev.Flags & (flagLate | flagRedo)
+			prevFlags = prev.Flags & (flagLate | flagRedo)
 		}
 
-		scores, flags, err := a.rubricScoresPrompt(rubric.Rubric, existing, flags, student.FirstName+" "+student.LastName)
+		scores, flags, err := a.rubricScoresPrompt(rubric.Rubric, existing, prevFlags, student.FirstName+" "+student.LastName)
 		if errors.Is(err, errRubricCancelled) {
 			fmt.Fprintf(a.out, "Skipped %s %s.\n", student.FirstName, student.LastName)
 			continue
@@ -495,20 +509,30 @@ func (a *App) RubricEnter() error {
 			total += score
 		}
 		totalValue := float64(total)
-		if err := a.saveGrade(ctx.AssignmentID, student.ID, gradeEntry{Score: &totalValue, Flags: flags}, prev); err != nil {
-			return err
+		entry := gradeEntry{Score: &totalValue, Flags: flags}
+		if prevFlags&flagLate != 0 && flags&flagLate == 0 {
+			entry.ClearLate = true
+		}
+		if prevFlags&flagRedo != 0 && flags&flagRedo == 0 {
+			entry.ClearRedo = true
 		}
 
+		// Write the filled DOCX before recording the grade so a file failure
+		// never leaves a grade without its rubric.
 		filled, err := FillRubricDocx(rubric.Template, student.FirstName+" "+student.LastName, scores)
 		if err != nil {
 			return err
 		}
-		outputPath := filepath.Join(a.homeDir, "rubrics", sanitizeFilename(meta.Title),
-			sanitizeFilename(student.LastName+"_"+student.FirstName)+".docx")
+		outputPath := filepath.Join(a.homeDir, "rubrics",
+			fmt.Sprintf("%d_%s", ctx.AssignmentID, sanitizeFilename(meta.Title)),
+			fmt.Sprintf("%d_%s.docx", student.ID, sanitizeFilename(student.LastName+"_"+student.FirstName)))
 		if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 			return err
 		}
 		if err := os.WriteFile(outputPath, filled, 0o644); err != nil {
+			return err
+		}
+		if err := a.saveGrade(ctx.AssignmentID, student.ID, entry, prev); err != nil {
 			return err
 		}
 		if err := a.saveRubricScores(ctx.AssignmentID, student.ID, scores, totalValue, outputPath); err != nil {
@@ -563,9 +587,18 @@ func (a *App) RubricList() error {
 }
 
 // rubricScoresPrompt collects per-criterion scores, using the interactive
-// arrow-key sheet on a terminal and plain line prompts otherwise.
+// arrow-key sheet on a terminal and plain line prompts otherwise. The sheet
+// only supports single-digit scores, so rubrics with a criterion worth more
+// than 9 points always use line prompts.
 func (a *App) rubricScoresPrompt(rubric Rubric, existing []int, flags int, studentName string) ([]int, int, error) {
-	if a.stdinFile != nil && term.IsTerminal(int(a.stdinFile.Fd())) {
+	singleDigit := true
+	for _, criterion := range rubric.Criteria {
+		if criterion.MaxPoints > 9 {
+			singleDigit = false
+			break
+		}
+	}
+	if singleDigit && a.stdinFile != nil && term.IsTerminal(int(a.stdinFile.Fd())) {
 		scores, flags, err := a.rubricScoreSheet(rubric, existing, flags, studentName)
 		if !errors.Is(err, errRubricNotTerminal) {
 			return scores, flags, err

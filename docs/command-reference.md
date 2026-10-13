@@ -194,7 +194,8 @@ grades rubric list
 
 - Students who already have a rubric are flagged, and their scores pre-fill for editing.
 - On a terminal, an interactive sheet opens: `↑`/`↓` move between criteria, `0`-`9` set the highlighted score, `l`/`r` toggle late/redo flags, `s` saves, `q`/`Esc` cancels. In a pipe, plain per-criterion prompts are used instead (Enter keeps the existing score).
-- The rubric total is recorded as the student's grade for the assignment (with the usual audit trail), and a filled, printable DOCX is written to `~/.grades/rubrics/<assignment>/<Student>.docx`.
+- The rubric total is recorded as the student's grade for the assignment (with the usual audit trail), and a filled, printable DOCX is written to `~/.grades/rubrics/<assignment-id>_<Assignment_Title>/<student-id>_<Last>_<First>.docx` (the IDs keep paths unique when assignments or students share names).
+- A linked rubric cannot be replaced once students have recorded rubric scores for that assignment.
 
 `rubric list` shows which roster students already have a rubric for the active assignment.
 

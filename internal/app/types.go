@@ -58,6 +58,7 @@ type gradeEntry struct {
 	Score     *float64
 	Flags     int
 	ClearRedo bool
+	ClearLate bool
 }
 
 type gradeHistory struct {
