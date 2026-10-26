@@ -4,6 +4,7 @@ import {
   adminListCourses,
   adminListMaterials,
   adminUploadMaterials,
+  adminDownloadMaterial,
   adminDeleteMaterial,
   adminRenameMaterial,
   adminMoveMaterial,
@@ -104,6 +105,12 @@ export function AdminMaterials() {
     setRenamingFile(null);
   };
 
+  const onDownload = (categoryId, name) => {
+    setError(null);
+    adminDownloadMaterial(selected.courseYearId, selected.termId, categoryId, name)
+      .catch((err) => setError(err.message));
+  };
+
   const onUploadPicked = (e) => {
     const files = Array.from(e.target.files || []);
     e.target.value = '';
@@ -166,6 +173,7 @@ export function AdminMaterials() {
           setRenamingFile={setRenamingFile}
           commitRenameFile={commitRenameFile}
           onMove={(file, to) => run(adminMoveMaterial(selected.courseYearId, selected.termId, GENERAL, to, file))}
+          onDownload={(file) => onDownload(GENERAL, file)}
           onDelete={(file) => {
             if (window.confirm(`Delete "${file}"?`)) {
               run(adminDeleteMaterial(selected.courseYearId, selected.termId, GENERAL, file));
@@ -196,6 +204,7 @@ export function AdminMaterials() {
             setRenamingFile={setRenamingFile}
             commitRenameFile={commitRenameFile}
             onMove={(file, to) => run(adminMoveMaterial(selected.courseYearId, selected.termId, cat.id, to, file))}
+            onDownload={(file) => onDownload(cat.id, file)}
             onDelete={(file) => {
               if (window.confirm(`Delete "${file}"?`)) {
                 run(adminDeleteMaterial(selected.courseYearId, selected.termId, cat.id, file));
@@ -250,6 +259,7 @@ function CategorySection({
   setRenamingFile,
   commitRenameFile,
   onMove,
+  onDownload,
   onDelete,
   onUpload,
   uploading,
@@ -348,6 +358,12 @@ function CategorySection({
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => onDownload(file.name)}
+                    className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    Download
+                  </button>
                   <select
                     value=""
                     onChange={(e) => e.target.value !== '' && onMove(file.name, e.target.value === GENERAL ? GENERAL : e.target.value)}

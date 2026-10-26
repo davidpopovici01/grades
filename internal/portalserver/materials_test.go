@@ -197,6 +197,98 @@ func TestMaterialsUploadListDownloadDelete(t *testing.T) {
 	}
 }
 
+func TestAdminMaterialDownload(t *testing.T) {
+	_, handler, _ := newMaterialsTestServer(t, "")
+
+	// Download requires the teacher token.
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/materials/download?courseYearId=1&termId=1&file=notes.pdf", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("download without token: got %d, want 401", rec.Code)
+	}
+
+	// Upload one root file and one file inside a category.
+	if rec := uploadMaterial(t, handler, 1, 1, "notes.pdf", "hello world", "test-teacher-token"); rec.Code != http.StatusOK {
+		t.Fatalf("upload root: %d %s", rec.Code, rec.Body.String())
+	}
+	catBody, _ := json.Marshal(map[string]string{"name": "Unit 1"})
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/materials/categories?courseYearId=1&termId=1", bytes.NewReader(catBody))
+	req.Header.Set("Authorization", "Bearer test-teacher-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create category: %d %s", rec.Code, rec.Body.String())
+	}
+	var cat MaterialCategory
+	if err := json.Unmarshal(rec.Body.Bytes(), &cat); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, err := w.CreateFormFile("file", "slides.pptx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("category content")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/admin/materials/upload?courseYearId=1&termId=1&category=%s", cat.ID), &body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer test-teacher-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload to category: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The teacher can download both.
+	for _, tc := range []struct {
+		query, wantBody, wantName string
+	}{
+		{"courseYearId=1&termId=1&file=notes.pdf", "hello world", "notes.pdf"},
+		{"courseYearId=1&termId=1&file=slides.pptx&category=" + cat.ID, "category content", "slides.pptx"},
+	} {
+		req = httptest.NewRequest(http.MethodGet, "/api/admin/materials/download?"+tc.query, nil)
+		req.Header.Set("Authorization", "Bearer test-teacher-token")
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("download %s: %d %s", tc.query, rec.Code, rec.Body.String())
+		}
+		if rec.Body.String() != tc.wantBody {
+			t.Fatalf("download %s body = %q", tc.query, rec.Body.String())
+		}
+		if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, tc.wantName) {
+			t.Fatalf("download %s Content-Disposition = %q", tc.query, cd)
+		}
+	}
+
+	// Missing file is a 404; unknown course is a 404; invalid category is a 400.
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"courseYearId=1&termId=1&file=missing.pdf", http.StatusNotFound},
+		{"courseYearId=99&termId=9&file=notes.pdf", http.StatusNotFound},
+		{"courseYearId=1&termId=1&file=notes.pdf&category=Bad%20Category", http.StatusBadRequest},
+		{"courseYearId=1&termId=1&file=..%5C..%5Cportal.db", http.StatusNotFound},
+	} {
+		req = httptest.NewRequest(http.MethodGet, "/api/admin/materials/download?"+tc.query, nil)
+		req.Header.Set("Authorization", "Bearer test-teacher-token")
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("download %s: got %d, want %d", tc.query, rec.Code, tc.want)
+		}
+	}
+}
+
 func TestMaterialsRequireLoginAndEnrollment(t *testing.T) {
 	server, handler, _ := newMaterialsTestServer(t, "")
 
