@@ -5,6 +5,12 @@ function formatPercent(value) {
   return `${value.toFixed(1)}%`;
 }
 
+function formatPointChange(value) {
+  if (value === null || value === undefined || isNaN(value)) return '—';
+  const rounded = Math.abs(value) < 0.05 ? 0 : value;
+  return `${rounded > 0 ? '+' : ''}${rounded.toFixed(1)} pts`;
+}
+
 function assignmentHasEntry(item) {
   return item.score !== null && item.score !== undefined || (item.flags?.length > 0);
 }
@@ -48,8 +54,9 @@ function effectiveAssignmentPercent(item) {
     return completionPercent(item);
   }
   let percent = recordPercent(item);
-  if (item.flags?.includes('pass')) {
-    percent = 100;
+  const hasScore = item.score !== null && item.score !== undefined;
+  if (item.flags?.includes('pass') || (hasScore && !item.flags?.includes('missing'))) {
+    if (item.flags?.includes('pass')) percent = 100;
     if (item.flags?.includes('redo')) percent -= 10;
     if (item.flags?.includes('late')) percent -= 10;
     percent = Math.max(percent, 0);
@@ -142,6 +149,7 @@ export function WhatIfStudio({ grades }) {
   const [scenarioTitle, setScenarioTitle] = useState('');
   const [scenarioMax, setScenarioMax] = useState('');
   const [scenarioScore, setScenarioScore] = useState('');
+  const [formError, setFormError] = useState('');
 
   const projectedCategories = useMemo(() => {
     if (!grades) return [];
@@ -185,6 +193,12 @@ export function WhatIfStudio({ grades }) {
     return computeWeightedTotal(projectedCategories);
   }, [projectedCategories]);
 
+  const currentTotal = useMemo(() => {
+    return computeWeightedTotal(
+      projectedCategories.map((cat) => ({ ...cat, _score: cat._baseScore }))
+    );
+  }, [projectedCategories]);
+
   if (!grades) {
     return (
       <div className="text-center py-20">
@@ -193,104 +207,173 @@ export function WhatIfStudio({ grades }) {
     );
   }
 
-  const addScenario = () => {
-    const max = parseFloat(scenarioMax);
-    const score = parseFloat(scenarioScore);
-    if (!scenarioTitle.trim() || !selectedCategory || isNaN(max) || max <= 0) return;
+  const totalChange = projectedTotal !== null && currentTotal !== null
+    ? projectedTotal - currentTotal
+    : null;
 
-    const category = grades.categories.find((c) => c.categoryId === parseInt(selectedCategory));
+  const addScenario = (event) => {
+    event.preventDefault();
+    const max = Number(scenarioMax);
+    const score = Number(scenarioScore);
+    const categoryId = Number(selectedCategory);
+    const category = grades.categories.find((c) => c.categoryId === categoryId);
+
+    if (!category) {
+      setFormError('Choose a category.');
+      return;
+    }
+    if (!scenarioMax.trim() || !Number.isFinite(max) || max <= 0) {
+      setFormError('Enter max points greater than 0.');
+      return;
+    }
+    if (!scenarioScore.trim() || !Number.isFinite(score) || score < 0 || score > max) {
+      setFormError('Enter a score between 0 and the max points.');
+      return;
+    }
 
     setScenarios((prev) => [
       ...prev,
       {
         id: `scenario-${Date.now()}`,
-        title: scenarioTitle.trim(),
-        categoryId: parseInt(selectedCategory),
-        categoryName: category?.categoryName || '',
+        title: scenarioTitle.trim() || `Scenario ${prev.length + 1}`,
+        categoryId,
+        categoryName: category.categoryName,
         maxPoints: max,
-        _percent: isNaN(score) ? null : (score / max) * 100,
+        _percent: (score / max) * 100,
         anchor: 100,
         lift: 1,
-        passPercent: category?.defaultPassPercent > 0 ? category.defaultPassPercent : null,
+        passPercent: category.defaultPassPercent > 0 ? category.defaultPassPercent : null,
         flags: [],
       },
     ]);
     setScenarioTitle('');
     setScenarioMax('');
     setScenarioScore('');
+    setFormError('');
   };
 
   const removeScenario = (id) => {
     setScenarios((prev) => prev.filter((s) => s.id !== id));
   };
 
+  const clearScenarios = () => {
+    setScenarios([]);
+    setFormError('');
+  };
+
   return (
     <div className="space-y-6">
       {/* Projected Total */}
       <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">What-If Studio</h2>
             <p className="text-sm text-gray-500">See how future assignments affect your grade</p>
           </div>
-          <div className="text-right">
-            <div className="text-3xl font-bold text-blue-700">{formatPercent(projectedTotal)}</div>
-            <div className="text-xs text-gray-500 uppercase tracking-wide">Projected Total</div>
+          <div className="flex items-center justify-between sm:justify-end gap-6" aria-live="polite">
+            <div className="text-right">
+              <div className="text-xl font-semibold text-gray-700">{formatPercent(currentTotal)}</div>
+              <div className="text-xs text-gray-500 uppercase tracking-wide">Current</div>
+            </div>
+            <div className="text-right">
+              <div className="text-3xl font-bold text-blue-700">{formatPercent(projectedTotal)}</div>
+              <div className="text-xs text-gray-500 uppercase tracking-wide">Projected</div>
+            </div>
+            <div className="text-right">
+              <div className={`text-lg font-semibold ${totalChange > 0 ? 'text-green-600' : totalChange < 0 ? 'text-red-600' : 'text-gray-700'}`}>
+                {formatPointChange(totalChange)}
+              </div>
+              <div className="text-xs text-gray-500 uppercase tracking-wide">Change</div>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Add Scenario */}
-      <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+      <form onSubmit={addScenario} noValidate className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
         <h3 className="font-semibold text-gray-800 mb-4">Add Scenario Assignment</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-          <select
-            value={selectedCategory}
-            onChange={(e) => setSelectedCategory(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            {grades.categories.map((cat) => (
-              <option key={cat.categoryId} value={cat.categoryId}>
-                {cat.categoryName}
-              </option>
-            ))}
-          </select>
-          <input
-            type="text"
-            placeholder="Title"
-            value={scenarioTitle}
-            onChange={(e) => setScenarioTitle(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <input
-            type="number"
-            placeholder="Max points"
-            value={scenarioMax}
-            onChange={(e) => setScenarioMax(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <input
-            type="number"
-            placeholder="Your score"
-            value={scenarioScore}
-            onChange={(e) => setScenarioScore(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <label className="block">
+            <span className="block mb-1 text-xs font-medium text-gray-600">Category</span>
+            <select
+              value={selectedCategory}
+              onChange={(e) => {
+                setSelectedCategory(e.target.value);
+                setFormError('');
+              }}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {grades.categories.map((cat) => (
+                <option key={cat.categoryId} value={cat.categoryId}>
+                  {cat.categoryName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="block mb-1 text-xs font-medium text-gray-600">Title (optional)</span>
+            <input
+              type="text"
+              placeholder="Scenario 1"
+              value={scenarioTitle}
+              onChange={(e) => setScenarioTitle(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </label>
+          <label className="block">
+            <span className="block mb-1 text-xs font-medium text-gray-600">Max points</span>
+            <input
+              type="number"
+              min="0.01"
+              step="any"
+              required
+              value={scenarioMax}
+              onChange={(e) => {
+                setScenarioMax(e.target.value);
+                setFormError('');
+              }}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </label>
+          <label className="block">
+            <span className="block mb-1 text-xs font-medium text-gray-600">Expected score</span>
+            <input
+              type="number"
+              min="0"
+              max={scenarioMax || undefined}
+              step="any"
+              required
+              value={scenarioScore}
+              onChange={(e) => {
+                setScenarioScore(e.target.value);
+                setFormError('');
+              }}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </label>
         </div>
+        {formError && <p role="alert" className="mt-3 text-sm text-red-600">{formError}</p>}
         <button
-          onClick={addScenario}
-          disabled={!scenarioTitle.trim() || !selectedCategory || !scenarioMax}
+          type="submit"
+          disabled={!selectedCategory}
           className="mt-3 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed text-sm"
         >
           Add Scenario
         </button>
-      </div>
+      </form>
 
       {/* Scenario List */}
       {scenarios.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100">
+          <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
             <h3 className="font-semibold text-gray-800">Scenario Assignments</h3>
+            <button
+              type="button"
+              onClick={clearScenarios}
+              className="text-sm font-medium text-red-600 hover:text-red-700"
+            >
+              Clear all
+            </button>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
