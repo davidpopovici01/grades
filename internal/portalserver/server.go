@@ -146,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/materials/download/", s.handleMaterialDownload)
 	mux.HandleFunc("/api/admin/materials", s.adminAuth(s.handleAdminMaterials))
 	mux.HandleFunc("/api/admin/materials/upload", s.adminAuth(s.handleAdminMaterialUpload))
+	mux.HandleFunc("/api/admin/materials/download", s.adminAuth(s.handleAdminMaterialDownload))
 	mux.HandleFunc("/api/admin/materials/delete", s.adminAuth(s.handleAdminMaterialDelete))
 	mux.HandleFunc("/api/admin/materials/rename", s.adminAuth(s.handleAdminMaterialRename))
 	mux.HandleFunc("/api/admin/materials/move", s.adminAuth(s.handleAdminMaterialMove))

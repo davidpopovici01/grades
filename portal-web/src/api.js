@@ -103,6 +103,32 @@ export const adminUploadMaterials = (courseYearId, termId, categoryId, files) =>
   });
 };
 
+// adminDownloadMaterial downloads one material file (teacher side).
+export const adminDownloadMaterial = (courseYearId, termId, categoryId, name) => {
+  const token = sessionStorage.getItem('adminToken') || '';
+  const query = materialsQuery(courseYearId, termId, `&file=${encodeURIComponent(name)}${categoryId ? `&category=${encodeURIComponent(categoryId)}` : ''}`);
+  return fetch(`${API_BASE}/admin/materials/download?${query}`, {
+    credentials: 'same-origin',
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(async (res) => {
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      const error = new Error(data?.error || `HTTP ${res.status}`);
+      error.status = res.status;
+      throw error;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+};
+
 export const adminDeleteMaterial = (courseYearId, termId, categoryId, name) =>
   adminFetch(`/admin/materials/delete?${materialsQuery(courseYearId, termId, `&file=${encodeURIComponent(name)}${categoryId ? `&category=${encodeURIComponent(categoryId)}` : ''}`)}`, {
     method: 'DELETE',

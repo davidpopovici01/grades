@@ -375,6 +375,23 @@ function AssignmentCard({ assignment }) {
     return { state: 'missing', size: null };
   };
 
+  // findSubmittedName locates this slot's file in the latest attempt, falling
+  // back to a stem match so alternates ("report.docx/pdf" → report.pdf) resolve.
+  const findSubmittedName = (parts) => {
+    const files = detail?.submissions?.[0]?.files || [];
+    for (const n of parts.names) {
+      const hit = files.find((f) => f.name === n);
+      if (hit) return hit.name;
+    }
+    const dot = parts.key.lastIndexOf('.');
+    const stem = dot > 0 ? parts.key.slice(0, dot) : parts.key;
+    const hit = files.find((f) => {
+      const fdot = f.name.lastIndexOf('.');
+      return (fdot > 0 ? f.name.slice(0, fdot) : f.name) === stem;
+    });
+    return hit ? hit.name : null;
+  };
+
   return (
     <div className="px-6 py-4 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -437,6 +454,7 @@ function AssignmentCard({ assignment }) {
         {(summary.expectedFilenames || []).map((name) => {
           const { state, size, actualName } = slotState(name);
           const parts = slotParts(name);
+          const submittedName = state === 'submitted' ? findSubmittedName(parts) : null;
           const picked = slotFiles[name];
           return (
             <div
@@ -472,6 +490,14 @@ function AssignmentCard({ assignment }) {
                       Remove
                     </button>
                   </>
+                )}
+                {state === 'submitted' && !picked && submittedName && (
+                  <button
+                    onClick={() => onFileDownload(summary.latestSubmission.id, submittedName)}
+                    className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    Download
+                  </button>
                 )}
                 <input
                   ref={(el) => { slotInputs.current[name] = el; }}

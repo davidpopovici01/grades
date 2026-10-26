@@ -498,6 +498,39 @@ func (s *Server) handleAdminMaterialDelete(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// handleAdminMaterialDownload serves a single material to the teacher.
+func (s *Server) handleAdminMaterialDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	course := s.adminCourse(w, r)
+	if course == nil {
+		return
+	}
+	name, err := sanitizeFilename(r.URL.Query().Get("file"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	dir := s.materialsDir(course.CourseYearID, course.TermID, course.CourseName)
+	if categoryID := r.URL.Query().Get("category"); categoryID != "" {
+		if !validCategoryID(categoryID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid category"})
+			return
+		}
+		dir = filepath.Join(dir, categoryID)
+	}
+	path := filepath.Join(dir, name)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	http.ServeFile(w, r, path)
+}
+
 // adminMetaRequest handles the shared boilerplate of the category-mutating
 // endpoints: resolve the course, read the JSON body, and load the meta.
 func (s *Server) adminMetaRequest(w http.ResponseWriter, r *http.Request, body any) (*CourseInfo, string, courseMeta, bool) {
