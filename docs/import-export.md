@@ -175,6 +175,20 @@ Was the export successful? [y/N]
 
 If you answer `no`, the assignment remains pending.
 
+## Category Total Export
+
+```powershell
+grades categories export
+```
+
+This exports every new or modified category in the current course and term. Unchanged categories are skipped.
+
+Each category gets its own PowerSchool-style CSV with the category name as both the assignment name and category/type. Every active student's score is their category total percentage on a 100-point scale, formatted to two decimals. The calculation uses the same curves, pass rates, penalties, missing-work rules, grading schemes, and drop-lowest settings as the category totals view.
+
+The console output includes the category's configured weight as a percentage of the total grade and highlights changed student scores. Inactive students, and students with no countable entries in the category, have blank score cells.
+
+Confirm each export as with assignment exports. A rejected category remains pending, and the command continues with the other pending categories. Category tracking is separate for each course and term.
+
 ### Portal Publishing
 
 When `portal.url` is set in `~/.grades/config.yaml`, every export command also pushes the current course snapshot and portal accounts to the student portal over HTTP. `grades publish` triggers the same push without exporting. See [`portal-deployment.md`](portal-deployment.md).
@@ -262,7 +276,7 @@ Inactive students are still included in the CSV, but their score cell is left bl
 
 ## Export And Backup Locations
 
-Default assignment exports are written to a sibling directory:
+Default assignment and category exports are written to a sibling directory:
 
 ```text
 ../gradesExports

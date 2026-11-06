@@ -174,4 +174,18 @@ func TestUp_AppliesOnce(t *testing.T) {
 	if dropLowestColumn != 1 {
 		t.Fatalf("expected category_grading_policies.drop_lowest column to exist, got %d", dropLowestColumn)
 	}
+
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version='017_category_exports';`).Scan(&count); err != nil {
+		t.Fatalf("schema_migrations query failed for 017: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected schema_migrations to contain 017_category_exports once, got %d", count)
+	}
+	var categoryExportsTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='category_exports';`).Scan(&categoryExportsTable); err != nil {
+		t.Fatalf("category_exports table query failed: %v", err)
+	}
+	if categoryExportsTable != 1 {
+		t.Fatalf("expected category_exports table to exist, got %d", categoryExportsTable)
+	}
 }
