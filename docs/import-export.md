@@ -276,10 +276,16 @@ Inactive students are still included in the CSV, but their score cell is left bl
 
 ## Export And Backup Locations
 
-Default assignment and category exports are written to a sibling directory:
+Default assignment exports are written to:
 
 ```text
 ../gradesExports
+```
+
+Category total exports use a separate directory:
+
+```text
+../gradesCategoryExports
 ```
 
 Database backups default to:

@@ -163,6 +163,12 @@ func hashCategoryExport(rule CategoryRule, meta assignmentExportMeta, rows []ass
 	return hex.EncodeToString(sum[:])
 }
 
+func (a *App) defaultCategoryExportPath(categoryName string) (string, error) {
+	exportDir := filepath.Clean(filepath.Join(a.homeDir, "..", "gradesCategoryExports"))
+	filename := sanitizeFilename(categoryName) + ".csv"
+	return filepath.Join(exportDir, filename), nil
+}
+
 func (a *App) exportCategory(courseYearID, termID int, item categoryExportDocument) error {
 	document := item.Document
 	fmt.Fprintf(a.out, "Assignment Name:\t%s\n", document.Meta.Title)
@@ -174,7 +180,7 @@ func (a *App) exportCategory(courseYearID, termID int, item categoryExportDocume
 	fmt.Fprintf(a.out, "Weight of Total Grade:\t%s\n", weight)
 	fmt.Fprintln(a.out, "Max Points:\t100.0")
 
-	file, err := a.defaultAssignmentExportPath(document.Meta.Title)
+	file, err := a.defaultCategoryExportPath(document.Meta.Title)
 	if err != nil {
 		return err
 	}

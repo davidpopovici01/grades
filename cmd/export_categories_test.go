@@ -54,7 +54,11 @@ func TestCategoryExportUsesTotalsAndOnlyExportsConfirmedChanges(t *testing.T) {
 	assertContains(t, first, "[2/2] Homework")
 	assertContains(t, first, "Weight of Total Grade:\t40.0%")
 
-	exportDir := filepath.Clean(filepath.Join(env.home, "..", "gradesExports"))
+	exportDir := filepath.Clean(filepath.Join(env.home, "..", "gradesCategoryExports"))
+	assignmentCategoryPath := filepath.Clean(filepath.Join(env.home, "..", "gradesExports", "Exam.csv"))
+	if _, err := os.Stat(assignmentCategoryPath); !os.IsNotExist(err) {
+		t.Fatalf("category export must not be written to the assignment export directory")
+	}
 	examPath := filepath.Join(exportDir, "Exam.csv")
 	homeworkPath := filepath.Join(exportDir, "Homework.csv")
 	examData, err := os.ReadFile(examPath)
