@@ -80,6 +80,8 @@ func TestAssignmentExportRowsMapUsesPowerSchoolNumOrName(t *testing.T) {
 	rows := []assignmentExportRow{
 		{PowerSchoolNum: "100401", StudentName: "Brown, Alice", Score: "90.00"},
 		{PowerSchoolNum: "", StudentName: "Zhang, Bob", Score: "80.00"},
+		{StudentID: 10, StudentName: "Smith, Sam", Score: "70.00"},
+		{StudentID: 11, StudentName: "Smith, Sam", Score: "85.00"},
 	}
 	m := assignmentExportRowsMap(rows)
 	if got, want := m["100401"], "90.00"; got != want {
@@ -87,5 +89,14 @@ func TestAssignmentExportRowsMapUsesPowerSchoolNumOrName(t *testing.T) {
 	}
 	if got, want := m["Zhang, Bob"], "80.00"; got != want {
 		t.Fatalf("expected %q, got %q", want, got)
+	}
+	if got, want := m["student:10"], "70.00"; got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+	if got, want := m["student:11"], "85.00"; got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+	if len(m) != len(rows) {
+		t.Fatalf("expected a separate history entry for every student, got %d entries for %d rows", len(m), len(rows))
 	}
 }

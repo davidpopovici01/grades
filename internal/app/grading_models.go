@@ -583,6 +583,7 @@ type categoryScoreValue struct {
 	Included bool
 }
 
+// categoryScoreValuesByStudent returns numeric category percentages and whether each category has countable entries.
 func (a *App) categoryScoreValuesByStudent(students []Student, rules []CategoryRule) (map[int]map[int]categoryScoreValue, error) {
 	ctx := a.context()
 	rows, err := a.db.Query(`
@@ -654,6 +655,7 @@ func (a *App) categoryScoreValuesByStudent(students []Student, rules []CategoryR
 	return values, nil
 }
 
+// categoryScoresByStudent formats category percentages and calculates weighted totals for display.
 func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) (map[int]map[int]string, map[int]string, error) {
 	scores, err := a.categoryScoreValuesByStudent(students, rules)
 	if err != nil {

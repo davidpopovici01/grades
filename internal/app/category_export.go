@@ -19,6 +19,7 @@ type categoryExportDocument struct {
 	Document assignmentExportDocument
 }
 
+// ExportPendingCategories exports new or changed category totals and records only confirmed exports.
 func (a *App) ExportPendingCategories() error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
@@ -56,6 +57,7 @@ func (a *App) ExportPendingCategories() error {
 	return nil
 }
 
+// buildCategoryExportDocuments calculates category totals and renders stable export documents for the current context.
 func (a *App) buildCategoryExportDocuments(termID, courseYearID int) ([]categoryExportDocument, error) {
 	rules, err := a.categoryRulesForContext(courseYearID, termID)
 	if err != nil {
@@ -92,6 +94,7 @@ func (a *App) buildCategoryExportDocuments(termID, courseYearID int) ([]category
 				score = strconv.FormatFloat(value.Percent, 'f', 2, 64)
 			}
 			rows = append(rows, assignmentExportRow{
+				StudentID:      student.ID,
 				PowerSchoolNum: student.PowerSchoolNum,
 				StudentName:    formatPowerSchoolExportName(student.LastName, student.ChineseName, student.FirstName),
 				Score:          score,
@@ -163,8 +166,20 @@ func hashCategoryExport(rule CategoryRule, meta assignmentExportMeta, rows []ass
 	return hex.EncodeToString(sum[:])
 }
 
-func (a *App) defaultCategoryExportPath(categoryName string) (string, error) {
-	exportDir := filepath.Clean(filepath.Join(a.homeDir, "..", "gradesCategoryExports"))
+func (a *App) defaultCategoryExportPath(courseYearID, termID int, categoryName string) (string, error) {
+	var courseYearName, termName string
+	if err := a.db.QueryRow(`
+		SELECT course_years.name, terms.name
+		FROM course_years
+		CROSS JOIN terms
+		WHERE course_years.course_year_id = ? AND terms.term_id = ?`, courseYearID, termID).
+		Scan(&courseYearName, &termName); err != nil {
+		return "", err
+	}
+	exportDir := filepath.Clean(filepath.Join(
+		a.homeDir, "..", "gradesCategoryExports",
+		sanitizeFilename(courseYearName), sanitizeFilename(termName),
+	))
 	filename := sanitizeFilename(categoryName) + ".csv"
 	return filepath.Join(exportDir, filename), nil
 }
@@ -180,7 +195,7 @@ func (a *App) exportCategory(courseYearID, termID int, item categoryExportDocume
 	fmt.Fprintf(a.out, "Weight of Total Grade:\t%s\n", weight)
 	fmt.Fprintln(a.out, "Max Points:\t100.0")
 
-	file, err := a.defaultCategoryExportPath(document.Meta.Title)
+	file, err := a.defaultCategoryExportPath(courseYearID, termID, document.Meta.Title)
 	if err != nil {
 		return err
 	}

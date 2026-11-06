@@ -282,10 +282,10 @@ Default assignment exports are written to:
 ../gradesExports
 ```
 
-Category total exports use a separate directory:
+Category total exports use a separate directory, namespaced by course-year and term:
 
 ```text
-../gradesCategoryExports
+../gradesCategoryExports/<course-year>/<term>/<Category>.csv
 ```
 
 Database backups default to:

@@ -18,11 +18,13 @@ func TestCategoryExportUsesTotalsAndOnlyExportsConfirmedChanges(t *testing.T) {
 		`INSERT INTO students(student_pk, first_name, last_name, powerschool_num, status) VALUES
 			(10, 'Alice', 'Brown', '100401', 'active'),
 			(11, 'Bob', 'Zhang', '100402', 'inactive'),
-			(12, 'Carol', 'Lin', '100403', 'active')`,
+			(12, 'Carol', 'Lin', '100403', 'active'),
+			(13, 'David', 'Jones', '100404', 'active')`,
 		`INSERT INTO section_enrollments(section_id, student_pk, term_id, start_date, status) VALUES
 			(1, 10, 1, '2026-08-15', 'active'),
 			(2, 11, 1, '2026-08-15', 'active'),
-			(1, 12, 1, '2026-08-15', 'active')`,
+			(1, 12, 1, '2026-08-15', 'active'),
+			(2, 13, 1, '2026-08-15', 'active')`,
 		`INSERT INTO category_schemes(scheme_id, name) VALUES (1, 'APCSA Fall')`,
 		`INSERT INTO category_scheme_weights(scheme_id, category_id, weight_percent) VALUES (1, 1, 60), (1, 2, 40)`,
 		`UPDATE course_year_terms SET scheme_id = 1 WHERE course_year_id = 1 AND term_id = 1`,
@@ -31,9 +33,9 @@ func TestCategoryExportUsesTotalsAndOnlyExportsConfirmedChanges(t *testing.T) {
 			(2, 1, 1, 2, 'HW1', 20),
 			(3, 1, 1, 2, 'HW2', 20)`,
 		`INSERT INTO grades(assignment_id, student_pk, score, flags_bitmask) VALUES
-			(1, 10, 90, 0), (1, 11, 80, 0),
-			(2, 10, 17, 0), (2, 11, 20, 0),
-			(3, 10, 20, 0), (3, 11, 20, 0)`,
+			(1, 10, 90, 0), (1, 11, 80, 0), (1, 13, 70, 0),
+			(2, 10, 17, 0), (2, 11, 20, 0), (2, 13, 20, 0),
+			(3, 10, 20, 0), (3, 11, 20, 0), (3, 13, 10, 0)`,
 	}
 	for _, statement := range statements {
 		if _, err := dbConn.Exec(statement); err != nil {
@@ -54,7 +56,7 @@ func TestCategoryExportUsesTotalsAndOnlyExportsConfirmedChanges(t *testing.T) {
 	assertContains(t, first, "[2/2] Homework")
 	assertContains(t, first, "Weight of Total Grade:\t40.0%")
 
-	exportDir := filepath.Clean(filepath.Join(env.home, "..", "gradesCategoryExports"))
+	exportDir := filepath.Clean(filepath.Join(env.home, "..", "gradesCategoryExports", "APCSA_2026-27", "Fall_2026"))
 	assignmentCategoryPath := filepath.Clean(filepath.Join(env.home, "..", "gradesExports", "Exam.csv"))
 	if _, err := os.Stat(assignmentCategoryPath); !os.IsNotExist(err) {
 		t.Fatalf("category export must not be written to the assignment export directory")
@@ -68,6 +70,7 @@ func TestCategoryExportUsesTotalsAndOnlyExportsConfirmedChanges(t *testing.T) {
 	assertContains(t, string(examData), "Assignment Name:,Exam,")
 	assertContains(t, string(examData), "Points Possible:,100.0,")
 	assertContains(t, string(examData), `100401,"Brown, Alice",90.00`)
+	assertContains(t, string(examData), `100404,"Jones, David",70.00`)
 	assertContains(t, string(examData), "100403,\"Lin, Carol\",\n")
 	assertContains(t, string(examData), "100402,\"Zhang, Bob\",\n")
 
@@ -77,6 +80,7 @@ func TestCategoryExportUsesTotalsAndOnlyExportsConfirmedChanges(t *testing.T) {
 	}
 	assertContains(t, string(homeworkData), "Assignment Name:,Homework,")
 	assertContains(t, string(homeworkData), `100401,"Brown, Alice",92.50`)
+	assertContains(t, string(homeworkData), `100404,"Jones, David",75.00`)
 
 	unchanged := mustRun(t, env, "", "categories", "export")
 	assertContains(t, unchanged, "No unexported or modified categories.")
@@ -107,4 +111,26 @@ func TestCategoryExportUsesTotalsAndOnlyExportsConfirmedChanges(t *testing.T) {
 	examRetry := mustRun(t, env, "y\n", "categories", "export")
 	assertContains(t, examRetry, "[1/1] Exam")
 	assertNotContains(t, examRetry, "Assignment Name:\tHomework")
+
+	if _, err := dbConn.Exec(`UPDATE category_scheme_weights SET weight_percent = 65 WHERE scheme_id = 1 AND category_id = 1`); err != nil {
+		t.Fatalf("change exam weight: %v", err)
+	}
+	weightChanged := mustRun(t, env, "y\n", "categories", "export")
+	assertContains(t, weightChanged, "[1/1] Exam")
+	assertContains(t, weightChanged, "Weight of Total Grade:\t65.0%")
+	assertNotContains(t, weightChanged, "Assignment Name:\tHomework")
+
+	if _, err := dbConn.Exec(`DELETE FROM category_scheme_weights WHERE scheme_id = 1 AND category_id = 1`); err != nil {
+		t.Fatalf("remove exam weight: %v", err)
+	}
+	unweighted := mustRun(t, env, "y\n", "categories", "export")
+	assertContains(t, unweighted, "[1/1] Exam")
+	assertContains(t, unweighted, "Weight of Total Grade:\tunweighted")
+
+	if _, err := dbConn.Exec(`INSERT INTO category_scheme_weights(scheme_id, category_id, weight_percent) VALUES (1, 1, 60)`); err != nil {
+		t.Fatalf("restore exam weight: %v", err)
+	}
+	reweighted := mustRun(t, env, "y\n", "categories", "export")
+	assertContains(t, reweighted, "[1/1] Exam")
+	assertContains(t, reweighted, "Weight of Total Grade:\t60.0%")
 }

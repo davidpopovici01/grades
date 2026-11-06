@@ -302,6 +302,7 @@ type assignmentExportMeta struct {
 }
 
 type assignmentExportRow struct {
+	StudentID      int
 	PowerSchoolNum string
 	StudentName    string
 	Score          string
@@ -563,9 +564,9 @@ func (a *App) assignmentExportRows(assignmentID, termID, courseYearID int) ([]as
 		if err := rows.Scan(&studentID, &powerSchoolNum, &lastName, &chineseName, &firstName, &status, &score, &flags, &maxPoints, &anchor, &lift, &schemeKey, &passPercent); err != nil {
 			return nil, err
 		}
-		_ = studentID
 		record := GradeRecord{Score: score, Flags: flags, MaxPoints: maxPoints, PassPercent: passPercent}
 		out = append(out, assignmentExportRow{
+			StudentID:      studentID,
 			PowerSchoolNum: powerSchoolNum,
 			StudentName:    formatPowerSchoolExportName(lastName, chineseName, firstName),
 			Score:          powerschoolExportScore(record, schemeKey, status, anchor, normalizeStoredLift(lift)),
@@ -672,6 +673,9 @@ func assignmentExportRowsMap(rows []assignmentExportRow) map[string]string {
 func assignmentExportRowKey(row assignmentExportRow) string {
 	if row.PowerSchoolNum != "" {
 		return row.PowerSchoolNum
+	}
+	if row.StudentID != 0 {
+		return "student:" + strconv.Itoa(row.StudentID)
 	}
 	return row.StudentName
 }
