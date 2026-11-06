@@ -578,7 +578,13 @@ func (a *App) ShowCategoryScores() error {
 	return tw.Flush()
 }
 
-func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) (map[int]map[int]string, map[int]string, error) {
+type categoryScoreValue struct {
+	Percent  float64
+	Included bool
+}
+
+// categoryScoreValuesByStudent returns numeric category percentages and whether each category has countable entries.
+func (a *App) categoryScoreValuesByStudent(students []Student, rules []CategoryRule) (map[int]map[int]categoryScoreValue, error) {
 	ctx := a.context()
 	rows, err := a.db.Query(`
 		SELECT assignments.assignment_id,
@@ -596,22 +602,20 @@ func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) 
 		WHERE assignments.course_year_id = ? AND assignments.term_id = ?
 		ORDER BY assignments.assignment_id`, ctx.CourseYearID, ctx.TermID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer rows.Close()
 
-	assignments := map[int]AssignmentScoreMeta{}
 	assignmentsByCategory := map[int][]AssignmentScoreMeta{}
 	for rows.Next() {
 		var meta AssignmentScoreMeta
 		if err := rows.Scan(&meta.ID, &meta.CategoryID, &meta.MaxPoints, &meta.Anchor, &meta.Lift, &meta.PassPercent); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		assignments[meta.ID] = meta
 		assignmentsByCategory[meta.CategoryID] = append(assignmentsByCategory[meta.CategoryID], meta)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	gradeRows, err := a.db.Query(`
@@ -620,7 +624,7 @@ func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) 
 		JOIN assignments ON assignments.assignment_id = grades.assignment_id
 		WHERE assignments.course_year_id = ? AND assignments.term_id = ?`, ctx.CourseYearID, ctx.TermID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer gradeRows.Close()
 
@@ -629,7 +633,7 @@ func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) 
 		var assignmentID int
 		var record GradeRecord
 		if err := gradeRows.Scan(&assignmentID, &record.StudentID, &record.Score, &record.Flags, &record.MaxPoints, &record.RedoCount); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if _, ok := gradesByStudent[record.StudentID]; !ok {
 			gradesByStudent[record.StudentID] = map[int]GradeRecord{}
@@ -637,6 +641,24 @@ func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) 
 		gradesByStudent[record.StudentID][assignmentID] = record
 	}
 	if err := gradeRows.Err(); err != nil {
+		return nil, err
+	}
+
+	values := map[int]map[int]categoryScoreValue{}
+	for _, student := range students {
+		values[student.ID] = map[int]categoryScoreValue{}
+		for _, rule := range rules {
+			score, ok := calculateCategoryScore(rule, assignmentsByCategory[rule.CategoryID], gradesByStudent[student.ID])
+			values[student.ID][rule.CategoryID] = categoryScoreValue{Percent: score, Included: ok}
+		}
+	}
+	return values, nil
+}
+
+// categoryScoresByStudent formats category percentages and calculates weighted totals for display.
+func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) (map[int]map[int]string, map[int]string, error) {
+	scores, err := a.categoryScoreValuesByStudent(students, rules)
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -647,14 +669,14 @@ func (a *App) categoryScoresByStudent(students []Student, rules []CategoryRule) 
 		weightedTotal := 0.0
 		totalWeight := 0.0
 		for _, rule := range rules {
-			score, ok := calculateCategoryScore(rule, assignmentsByCategory[rule.CategoryID], gradesByStudent[student.ID])
-			if !ok {
+			score := scores[student.ID][rule.CategoryID]
+			if !score.Included {
 				values[student.ID][rule.CategoryID] = ""
 				continue
 			}
-			values[student.ID][rule.CategoryID] = fmt.Sprintf("%.1f%%", score)
+			values[student.ID][rule.CategoryID] = fmt.Sprintf("%.1f%%", score.Percent)
 			if rule.HasWeight {
-				weightedTotal += score * rule.WeightPercent
+				weightedTotal += score.Percent * rule.WeightPercent
 				totalWeight += rule.WeightPercent
 			}
 		}

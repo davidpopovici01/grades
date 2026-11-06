@@ -26,8 +26,8 @@ It is built for a teacher workflow:
   - roster CSVs
   - category setup CSVs
   - PowerSchool student numbers
-- Exports assignment grades in PowerSchool CSV format
-- Tracks whether an assignment has been exported, and whether it needs re-export after changes
+- Exports assignment grades or per-student category totals in PowerSchool CSV format
+- Tracks assignments and categories that need export after changes
 - Provides:
   - gradebook view
   - overview view

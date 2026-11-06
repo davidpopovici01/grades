@@ -52,6 +52,9 @@ var dropLowestSQL string
 //go:embed sql/016_rubrics.sql
 var rubricsSQL string
 
+//go:embed sql/017_category_exports.sql
+var categoryExportsSQL string
+
 type migration struct {
 	version string
 	sql     string
@@ -73,6 +76,7 @@ var migrations = []migration{
 	{version: "014_capitalize_student_names", sql: capitalizeStudentNamesSQL},
 	{version: "015_drop_lowest", sql: dropLowestSQL},
 	{version: "016_rubrics", sql: rubricsSQL},
+	{version: "017_category_exports", sql: categoryExportsSQL},
 }
 
 func Up(db *sql.DB) error {
@@ -121,6 +125,7 @@ func Down(db *sql.DB) error {
 		`DROP TABLE IF EXISTS grades;`,
 		`DROP TABLE IF EXISTS assignment_curves;`,
 		`DROP TABLE IF EXISTS assignment_exports;`,
+		`DROP TABLE IF EXISTS category_exports;`,
 		`DROP TABLE IF EXISTS submission_files;`,
 		`DROP TABLE IF EXISTS submission_attempts;`,
 		`DROP TABLE IF EXISTS submission_policies;`,

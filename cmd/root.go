@@ -565,6 +565,17 @@ func newCategoriesCmd(a *app.App) *cobra.Command {
 			return a.ShowCategoryScores()
 		},
 	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "export",
+		Args:  cobra.NoArgs,
+		Short: "Export all unexported or modified category totals in the current course and term",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.ExportPendingCategories(); err != nil {
+				return err
+			}
+			return a.PublishStudentPortal()
+		},
+	})
 
 	return cmd
 }

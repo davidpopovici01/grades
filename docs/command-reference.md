@@ -120,6 +120,7 @@ grades categories copy-year [course-year]
 grades categories setup-csv [file]
 grades categories scores
 grades categories totals
+grades categories export
 ```
 
 `show`, `hide`, and `set-visibility` control whether a category appears in the overview.
@@ -249,9 +250,10 @@ grades import setup-csv [file]
 ```powershell
 grades export
 grades export grades [file]
+grades categories export
 ```
 
-Exports every assignment in the current course and term that still needs export confirmation. When `portal.url` is set in `~/.grades/config.yaml`, export also pushes the course snapshot to the student portal afterwards (same as `grades publish`).
+`grades export` exports every assignment in the current course and term that still needs export confirmation. `grades categories export` does the same for per-student category totals, writing one CSV per new or modified category and displaying each category's weight of the total grade. When `portal.url` is set in `~/.grades/config.yaml`, export also pushes the course snapshot to the student portal afterwards (same as `grades publish`).
 
 ## Student Portal
 
