@@ -256,9 +256,9 @@ class UnoBackend:
         page_style.setPropertyValue("ScaleToPagesX", fit_to_pages_wide)
         page_style.setPropertyValue("ScaleToPagesY", int(fit_to_pages_tall) if fit_to_pages_tall else 0)
 
-    def create_printable_copy(self, doc, sheet_name, temp_path, new_sheet_name):
+    def create_printable_copy(self, doc, sheet_name, temp_path, new_sheet_name, format):
         """Save the current workbook, then open that copy and trim it to one sheet."""
-        self.save_as(doc, temp_path, "xls")
+        self.save_as(doc, temp_path, format)
         self.close_workbook(doc, save_changes=False)
 
         printable = self.open_workbook(temp_path, readonly=False)
@@ -341,15 +341,23 @@ def preflight_report(workbook_path, payload_path):
         backend.quit()
 
 
+def workbook_format(path):
+    extension = os.path.splitext(path)[1].lower()
+    if extension not in (".xls", ".xlsx"):
+        raise BackendError("workbook must use the .xls or .xlsx extension")
+    return extension[1:]
+
+
 def write_report(workbook_path, payload_path):
     payload = load_payload(payload_path)
     backend = find_backend()
     source_path = os.path.abspath(workbook_path)
+    output_format = workbook_format(source_path)
 
     # Keep the temp file next to the source so os.replace stays on the same filesystem.
     fd, temp_path = tempfile.mkstemp(
         prefix="grades-excel-report-",
-        suffix=".xls",
+        suffix="." + output_format,
         dir=os.path.dirname(source_path),
     )
     os.close(fd)
@@ -371,11 +379,13 @@ def write_report(workbook_path, payload_path):
 
         if isinstance(backend, Win32Backend):
             printable = backend.copy_sheet_to_new_workbook(sheet, "Senior 2 APCSA")
-            backend.save_as(workbook, temp_path, "xls")
+            backend.save_as(workbook, temp_path, output_format)
             backend.close_workbook(workbook, save_changes=False)
             workbook = None
         else:
-            printable = backend.create_printable_copy(workbook, payload["sheet"], temp_path, "Senior 2 APCSA")
+            printable = backend.create_printable_copy(
+                workbook, payload["sheet"], temp_path, "Senior 2 APCSA", output_format
+            )
             workbook = None
 
         # Replace the original workbook with the updated copy.

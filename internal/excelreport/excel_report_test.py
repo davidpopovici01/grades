@@ -82,8 +82,13 @@ class PreflightReportTest(unittest.TestCase):
         return {"first_name": first_name, "last_name": last_name}
 
     @staticmethod
-    def payload_file(rows):
-        payload = {"sheet": "Senior2", "teacher": "David P.", "rows": rows}
+    def payload_file(rows, printable_path="printable.xlsx"):
+        payload = {
+            "sheet": "Senior2",
+            "teacher": "David P.",
+            "printable": printable_path,
+            "rows": rows,
+        }
         handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json", delete=False)
         handle.close()
         with open(handle.name, "w", encoding="utf-8") as output:
@@ -97,6 +102,54 @@ class PreflightReportTest(unittest.TestCase):
                 os.remove(handle.name)
 
         return Cleanup()
+
+
+class WriteReportFormatTest(unittest.TestCase):
+    def test_xlsx_source_is_saved_as_xlsx(self):
+        backend = mock.Mock()
+        backend.get_sheet.return_value = object()
+        backend.used_bounds.return_value = (1, 1, 4, 15)
+        cells = {
+            (2, 10): "David P.",
+            (4, 6): "Brown",
+            (4, 7): "Alice",
+        }
+        backend.get_value.side_effect = lambda _sheet, row, col: cells.get((row, col))
+
+        def create_printable_copy(_doc, _sheet_name, temp_path, _new_sheet_name, format):
+            self.assertEqual(format, "xlsx")
+            self.assertTrue(temp_path.endswith(".xlsx"))
+            with open(temp_path, "wb") as output:
+                output.write(b"updated xlsx workbook")
+            return object()
+
+        backend.create_printable_copy.side_effect = create_printable_copy
+        row = {
+            "first_name": "Alice",
+            "last_name": "Brown",
+            "exam_grade": 90,
+            "quarter_grade": 90,
+            "quarter_letter": "A-",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = os.path.join(directory, "report.xlsx")
+            with open(source_path, "wb") as output:
+                output.write(b"original workbook")
+            printable_path = os.path.join(directory, "printable.xlsx")
+            with PreflightReportTest.payload_file([row], printable_path) as payload_path:
+                with mock.patch.object(excel_report, "find_backend", return_value=backend):
+                    excel_report.write_report(source_path, payload_path)
+
+            with open(source_path, "rb") as source:
+                self.assertEqual(source.read(), b"updated xlsx workbook")
+
+        backend.save_as.assert_called_once_with(mock.ANY, printable_path, "xlsx")
+
+    def test_workbook_format_supports_xls_and_rejects_other_extensions(self):
+        self.assertEqual(excel_report.workbook_format("report.xls"), "xls")
+        self.assertEqual(excel_report.workbook_format("REPORT.XLSX"), "xlsx")
+        with self.assertRaises(excel_report.BackendError):
+            excel_report.workbook_format("report.ods")
 
 
 if __name__ == "__main__":
