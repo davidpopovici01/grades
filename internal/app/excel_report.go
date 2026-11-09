@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/davidpopovici01/grades/internal/excelreport"
 	"github.com/davidpopovici01/grades/internal/portalauth"
 )
 
@@ -119,10 +120,11 @@ func (a *App) ExcelReport(opts ExcelReportOptions) error {
 		return errors.New("no students found for the current course and term")
 	}
 
-	script := filepath.Join("internal", "excelreport", "excel_report.py")
-	if _, err := os.Stat(script); err != nil {
+	script, err := createExcelReportScript()
+	if err != nil {
 		return err
 	}
+	defer os.Remove(script)
 	pythonBin, err := findPython()
 	if err != nil {
 		return err
@@ -176,6 +178,24 @@ func writeExcelReportPayload(path string, payload excelReportPayload) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+func createExcelReportScript() (string, error) {
+	file, err := os.CreateTemp("", "grades-excel-report-*.py")
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if _, err := file.WriteString(excelreport.Script); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
 }
 
 func (a *App) buildExcelReportPayload(opts ExcelReportOptions, printable string) (excelReportPayload, error) {
