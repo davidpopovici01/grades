@@ -319,6 +319,7 @@ func adminAssignmentJSON(a *SubAssignment, courseName string) map[string]any {
 		"maxTotalBytes":     a.MaxTotalBytes,
 		"lateCapPercent":    a.LateCapPercent,
 		"isOpen":            a.IsOpen,
+		"completed":         a.Completed,
 		"createdAt":         a.CreatedAt,
 	}
 	if courseName != "" {
@@ -431,7 +432,7 @@ func (s *Server) handleAdminSubDisk(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAdminSubAssignment handles GET/PUT/DELETE on one assignment.
+// handleAdminSubAssignment handles GET/PUT/PATCH/DELETE on one assignment.
 func (s *Server) handleAdminSubAssignment(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -478,11 +479,26 @@ func (s *Server) handleAdminSubAssignment(w http.ResponseWriter, r *http.Request
 			return
 		}
 		updated.ID = id
+		updated.Completed = a.Completed
 		if err := s.store.UpdateSubAssignment(updated); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update assignment"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"assignment": adminAssignmentJSON(updated, "")})
+	case http.MethodPatch:
+		var req struct {
+			Completed *bool `json:"completed"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Completed == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "completed boolean required"})
+			return
+		}
+		if err := s.store.SetSubAssignmentCompleted(id, *req.Completed); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update assignment"})
+			return
+		}
+		a.Completed = *req.Completed
+		writeJSON(w, http.StatusOK, map[string]any{"assignment": adminAssignmentJSON(a, "")})
 	case http.MethodDelete:
 		if err := s.store.DeleteSubAssignment(id); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete assignment"})

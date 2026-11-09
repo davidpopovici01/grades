@@ -1485,6 +1485,112 @@ func TestSlotAlternativeExtensions(t *testing.T) {
 	}
 }
 
+func TestAdminSubAssignmentCompleted(t *testing.T) {
+	_, handler, _ := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, nil)
+
+	var detail struct {
+		Assignment struct {
+			Completed bool `json:"completed"`
+		} `json:"assignment"`
+	}
+	rec := adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get assignment: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Assignment.Completed {
+		t.Fatal("new assignment should not be completed")
+	}
+
+	rec = adminRequest(t, handler, http.MethodPatch,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID), map[string]any{"completed": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("complete assignment: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if !detail.Assignment.Completed {
+		t.Fatal("PATCH response should show the assignment completed")
+	}
+
+	rec = adminRequest(t, handler, http.MethodPut,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID), map[string]any{
+			"courseYearId": 1, "termId": 1, "title": "HW1 updated", "language": "python",
+			"expectedFilenames": "main.py", "isOpen": true,
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edit assignment: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if !detail.Assignment.Completed {
+		t.Fatal("ordinary assignment edit reset completion")
+	}
+
+	var list struct {
+		Assignments []struct {
+			ID        int64  `json:"id"`
+			Title     string `json:"title"`
+			Completed bool   `json:"completed"`
+		} `json:"assignments"`
+	}
+	rec = adminRequest(t, handler, http.MethodGet,
+		"/api/admin/submissions/assignments?courseYearId=1&termId=1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list assignments: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Assignments) != 1 || list.Assignments[0].ID != assignmentID ||
+		list.Assignments[0].Title != "HW1 updated" || !list.Assignments[0].Completed {
+		t.Fatalf("completed assignment list mismatch: %+v", list.Assignments)
+	}
+
+	rec = adminRequest(t, handler, http.MethodPatch,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID), map[string]any{"completed": false})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("uncomplete assignment: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Assignment.Completed {
+		t.Fatal("PATCH response should show the assignment uncompleted")
+	}
+
+	rec = adminRawRequest(t, handler, http.MethodPatch,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID), "{")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed PATCH: got %d, want 400", rec.Code)
+	}
+	rec = adminRequest(t, handler, http.MethodPatch,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID), map[string]any{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing completed field: got %d, want 400", rec.Code)
+	}
+	rec = adminRequest(t, handler, http.MethodPatch,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID+1), map[string]any{"completed": true})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown assignment: got %d, want 404", rec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodPatch,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID),
+		strings.NewReader(`{"completed":true}`))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("PATCH without teacher token: got %d, want 401", rec.Code)
+	}
+}
+
 // TestSubStoreCRUD exercises the submissions store round trip, including the
 // latest-per-test semantics and the delete cascade.
 func TestSubStoreCRUD(t *testing.T) {
@@ -1512,18 +1618,28 @@ func TestSubStoreCRUD(t *testing.T) {
 	}
 	if got.Title != "HW" || got.Language != "java" || got.DueAt == nil || *got.DueAt != due ||
 		len(got.ExpectedFilenames) != 1 || got.ExpectedFilenames[0] != "Main.java" ||
-		got.MaxFileBytes != 1024 || !got.IsOpen {
+		got.MaxFileBytes != 1024 || !got.IsOpen || got.Completed {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 
+	if err := store.SetSubAssignmentCompleted(id, true); err != nil {
+		t.Fatal(err)
+	}
 	got.Title = "HW2"
 	got.IsOpen = false
 	if err := store.UpdateSubAssignment(got); err != nil {
 		t.Fatal(err)
 	}
 	got, err = store.GetSubAssignment(id)
-	if err != nil || got.Title != "HW2" || got.IsOpen {
+	if err != nil || got.Title != "HW2" || got.IsOpen || !got.Completed {
 		t.Fatalf("update mismatch: %+v", got)
+	}
+	if err := store.SetSubAssignmentCompleted(id, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetSubAssignment(id)
+	if err != nil || got.Completed {
+		t.Fatalf("completion should be false after update: %+v, %v", got, err)
 	}
 
 	if all, err := store.ListAllSubAssignments(); err != nil || len(all) != 1 {
