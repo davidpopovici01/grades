@@ -70,7 +70,14 @@ func TestExcelReportWritesCScoresAfterSuccessfulPreflight(t *testing.T) {
 	t.Cleanup(func() { runExcelReportScript = originalRunner })
 	var argsLog [][]string
 	var payloads []excelReportPayload
-	runExcelReportScript = func(_, _ string, args []string, _, _ io.Writer) error {
+	runExcelReportScript = func(_, script string, args []string, _, _ io.Writer) error {
+		scriptData, err := os.ReadFile(script)
+		if err != nil {
+			t.Fatalf("read embedded script: %v", err)
+		}
+		if !strings.Contains(string(scriptData), "def preflight_report(") {
+			t.Fatal("temporary script does not contain the embedded report implementation")
+		}
 		argsLog = append(argsLog, append([]string(nil), args...))
 		data, err := os.ReadFile(args[len(args)-1])
 		if err != nil {
@@ -113,15 +120,6 @@ func TestExcelReportWritesCScoresAfterSuccessfulPreflight(t *testing.T) {
 
 func newExcelReportTestApp(t *testing.T, input string) (*App, *bytes.Buffer, string, string) {
 	t.Helper()
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(filepath.Clean(filepath.Join(oldWD, "..", ".."))); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-
 	home := t.TempDir()
 	t.Setenv("GRADES_HOME", home)
 	t.Setenv("GRADES_DB_PATH", filepath.Join(home, "grades.db"))
