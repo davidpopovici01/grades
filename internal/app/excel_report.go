@@ -55,6 +55,13 @@ func findPython() (string, error) {
 	return "", errors.New("python interpreter not found in PATH (tried python3, python)")
 }
 
+var runExcelReportScript = func(pythonBin, script string, args []string, stdout, stderr io.Writer) error {
+	run := exec.Command(pythonBin, append([]string{script}, args...)...)
+	run.Stdout = stdout
+	run.Stderr = stderr
+	return run.Run()
+}
+
 func (a *App) ExcelReport(opts ExcelReportOptions) error {
 	ctx := a.context()
 	if ctx.TermID == 0 || ctx.CourseYearID == 0 {
@@ -111,36 +118,6 @@ func (a *App) ExcelReport(opts ExcelReportOptions) error {
 	if len(payload.Rows) == 0 {
 		return errors.New("no students found for the current course and term")
 	}
-	if !opts.SkipCScores {
-		if err := a.promptExcelReportCScores(payload.Rows); err != nil {
-			return err
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(printable), 0o755); err != nil {
-		return err
-	}
-	backup := workbook + "." + time.Now().Format("20060102_150405") + ".bak"
-	if err := copyFile(workbook, backup); err != nil {
-		return err
-	}
-
-	payloadFile, err := os.CreateTemp("", "grades-excel-report-*.json")
-	if err != nil {
-		return err
-	}
-	encoder := json.NewEncoder(payloadFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(payload); err != nil {
-		_ = payloadFile.Close()
-		_ = os.Remove(payloadFile.Name())
-		return err
-	}
-	if err := payloadFile.Close(); err != nil {
-		_ = os.Remove(payloadFile.Name())
-		return err
-	}
-	defer os.Remove(payloadFile.Name())
 
 	script := filepath.Join("internal", "excelreport", "excel_report.py")
 	if _, err := os.Stat(script); err != nil {
@@ -150,10 +127,40 @@ func (a *App) ExcelReport(opts ExcelReportOptions) error {
 	if err != nil {
 		return err
 	}
-	run := exec.Command(pythonBin, script, workbook, payloadFile.Name())
-	run.Stdout = a.out
-	run.Stderr = a.errOut
-	if err := run.Run(); err != nil {
+	payloadFile, err := os.CreateTemp("", "grades-excel-report-*.json")
+	if err != nil {
+		return err
+	}
+	payloadPath := payloadFile.Name()
+	if err := payloadFile.Close(); err != nil {
+		_ = os.Remove(payloadPath)
+		return err
+	}
+	defer os.Remove(payloadPath)
+	if err := writeExcelReportPayload(payloadPath, payload); err != nil {
+		return err
+	}
+	if err := runExcelReportScript(pythonBin, script, []string{"--preflight", workbook, payloadPath}, a.out, a.errOut); err != nil {
+		return fmt.Errorf("excel report preflight failed: %w", err)
+	}
+
+	if !opts.SkipCScores {
+		if err := a.promptExcelReportCScores(payload.Rows); err != nil {
+			return err
+		}
+	}
+	if err := writeExcelReportPayload(payloadPath, payload); err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(printable), 0o755); err != nil {
+		return err
+	}
+	backup := workbook + "." + time.Now().Format("20060102_150405") + ".bak"
+	if err := copyFile(workbook, backup); err != nil {
+		return err
+	}
+	if err := runExcelReportScript(pythonBin, script, []string{workbook, payloadPath}, a.out, a.errOut); err != nil {
 		return err
 	}
 
@@ -161,6 +168,14 @@ func (a *App) ExcelReport(opts ExcelReportOptions) error {
 	fmt.Fprintf(a.out, "Backup created: %s\n", backup)
 	fmt.Fprintf(a.out, "Printable report: %s\n", printable)
 	return nil
+}
+
+func writeExcelReportPayload(path string, payload excelReportPayload) error {
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func (a *App) buildExcelReportPayload(opts ExcelReportOptions, printable string) (excelReportPayload, error) {

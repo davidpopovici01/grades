@@ -302,10 +302,47 @@ def find_student_rows(backend, sheet, first_col, last_col, start_row, end_row):
     return rows
 
 
-def write_report(workbook_path, payload_path):
+def load_payload(payload_path):
     with open(payload_path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+        return json.load(handle)
 
+
+def inspect_report(backend, workbook, payload):
+    sheet = backend.get_sheet(workbook, payload["sheet"])
+    _, _, last_row, last_col = backend.used_bounds(sheet)
+    subject_col = find_subject_col(backend, sheet, payload["teacher"], last_col)
+    row_lookup = find_student_rows(backend, sheet, 7, 6, 4, last_row)
+
+    matched = []
+    missing = []
+    for item in payload["rows"]:
+        key = (norm(item["first_name"]), norm(item["last_name"]))
+        row = row_lookup.get(key)
+        if row is None:
+            missing.append(f'{item["first_name"]} {item["last_name"]}')
+        else:
+            matched.append((row, item))
+    if missing:
+        raise BackendError("Missing from sheet: " + ", ".join(missing))
+    return sheet, subject_col, matched
+
+
+def preflight_report(workbook_path, payload_path):
+    payload = load_payload(payload_path)
+    backend = find_backend()
+    workbook = None
+    try:
+        workbook = backend.open_workbook(os.path.abspath(workbook_path), readonly=True)
+        _, _, matched = inspect_report(backend, workbook, payload)
+        print(f"Preflight passed: {len(matched)} student(s) matched")
+    finally:
+        if workbook is not None:
+            backend.close_workbook(workbook, save_changes=False)
+        backend.quit()
+
+
+def write_report(workbook_path, payload_path):
+    payload = load_payload(payload_path)
     backend = find_backend()
     source_path = os.path.abspath(workbook_path)
 
@@ -322,19 +359,8 @@ def write_report(workbook_path, payload_path):
     printable = None
     try:
         workbook = backend.open_workbook(source_path, readonly=False)
-        sheet = backend.get_sheet(workbook, payload["sheet"])
-        _, _, last_row, last_col = backend.used_bounds(sheet)
-        subject_col = find_subject_col(backend, sheet, payload["teacher"], last_col)
-        row_lookup = find_student_rows(backend, sheet, 7, 6, 4, last_row)
-
-        matched = []
-        missing = []
-        for item in payload["rows"]:
-            key = (norm(item["first_name"]), norm(item["last_name"]))
-            row = row_lookup.get(key)
-            if row is None:
-                missing.append(f'{item["first_name"]} {item["last_name"]}')
-                continue
+        sheet, subject_col, matched = inspect_report(backend, workbook, payload)
+        for row, item in matched:
             backend.set_value(sheet, row, subject_col, float(item["exam_grade"]))
             backend.set_value(sheet, row, subject_col + 1, int(item["quarter_grade"]))
             backend.set_value(sheet, row, subject_col + 2, item["quarter_letter"])
@@ -342,7 +368,6 @@ def write_report(workbook_path, payload_path):
                 backend.set_value(sheet, row, subject_col + 3, item["c_score_1"])
             if "c_score_2" in item:
                 backend.set_value(sheet, row, subject_col + 4, item["c_score_2"])
-            matched.append((row, item))
 
         if isinstance(backend, Win32Backend):
             printable = backend.copy_sheet_to_new_workbook(sheet, "Senior 2 APCSA")
@@ -389,8 +414,6 @@ def write_report(workbook_path, payload_path):
         printable = None
 
         print(f"Matched students: {len(matched)}")
-        if missing:
-            print("Missing from sheet: " + ", ".join(missing))
     finally:
         if workbook is not None:
             backend.close_workbook(workbook, save_changes=False)
@@ -400,6 +423,12 @@ def write_report(workbook_path, payload_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: excel_report.py <workbook> <payload.json>")
-    write_report(sys.argv[1], sys.argv[2])
+    try:
+        if len(sys.argv) == 4 and sys.argv[1] == "--preflight":
+            preflight_report(sys.argv[2], sys.argv[3])
+        elif len(sys.argv) == 3:
+            write_report(sys.argv[1], sys.argv[2])
+        else:
+            raise SystemExit("usage: excel_report.py [--preflight] <workbook> <payload.json>")
+    except (BackendError, RuntimeError) as exc:
+        raise SystemExit(f"Excel report error: {exc}") from None

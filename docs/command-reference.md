@@ -228,7 +228,7 @@ grades reports create <student> [file]
 grades excel-report [workbook]
 ```
 
-`excel-report` fills the Senior 2 APCSA Excel report. Flags: `--workbook`, `--sheet` (default `Senior2`), `--teacher`, `--exam-category` (default `Midterm`), `--printable`, `--skip-c-scores`.
+`excel-report` fills the Senior 2 APCSA Excel report. Before prompting for C scores, it opens the workbook read-only and validates the Excel/LibreOffice backend, worksheet, teacher header, and every student's name. Any validation failure stops the command before C-score entry or workbook backup. Flags: `--workbook`, `--sheet` (default `Senior2`), `--teacher`, `--exam-category` (default `Midterm`), `--printable`, `--skip-c-scores`.
 
 Overview cutoff:
 
