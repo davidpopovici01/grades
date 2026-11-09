@@ -85,6 +85,7 @@ func (s *Store) migrate() error {
 			max_total_bytes INTEGER NOT NULL DEFAULT 1048576,
 			late_cap_percent INTEGER NOT NULL DEFAULT 90,
 			is_open INTEGER NOT NULL DEFAULT 1,
+			completed INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_sub_assignments_course ON sub_assignments(course_year_id, term_id);`,
@@ -170,6 +171,10 @@ func (s *Store) migrate() error {
 	}
 	// Databases created before the built-in diff check existed need the column added.
 	if err := s.addColumnIfMissing("sub_plag_runs", "tool", `TEXT NOT NULL DEFAULT 'jplag'`); err != nil {
+		return err
+	}
+	// Databases created before assignment completion existed need the column added.
+	if err := s.addColumnIfMissing("sub_assignments", "completed", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	// Databases created before activity tracking existed need the column added.

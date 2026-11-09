@@ -15,8 +15,8 @@ import (
 	"github.com/davidpopovici01/grades/internal/portalauth"
 )
 
-// TestStoreMigratesOlderDatabases opens a database whose published_courses
-// table predates the course_year_name column and verifies NewStore adds it.
+// TestStoreMigratesOlderDatabases verifies NewStore adds columns missing from
+// tables created by older versions.
 func TestStoreMigratesOlderDatabases(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "old.db")
 	conn, err := sql.Open("sqlite", dbPath)
@@ -34,6 +34,24 @@ func TestStoreMigratesOlderDatabases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = conn.Exec(`CREATE TABLE sub_assignments (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		course_year_id INTEGER NOT NULL,
+		term_id INTEGER NOT NULL,
+		title TEXT NOT NULL,
+		language TEXT NOT NULL,
+		instructions TEXT NOT NULL DEFAULT '',
+		due_at TEXT,
+		expected_filenames TEXT NOT NULL DEFAULT '',
+		max_file_bytes INTEGER NOT NULL DEFAULT 262144,
+		max_total_bytes INTEGER NOT NULL DEFAULT 1048576,
+		late_cap_percent INTEGER NOT NULL DEFAULT 90,
+		is_open INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL DEFAULT ''
+	);`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +62,21 @@ func TestStoreMigratesOlderDatabases(t *testing.T) {
 	}
 	defer store.Close()
 
-	var count int
-	if err := store.db.QueryRow(
-		`SELECT COUNT(*) FROM pragma_table_info('published_courses') WHERE name = 'course_year_name'`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatalf("expected course_year_name column after migration, count=%d", count)
+	for _, check := range []struct {
+		table  string
+		column string
+	}{
+		{table: "published_courses", column: "course_year_name"},
+		{table: "sub_assignments", column: "completed"},
+	} {
+		var count int
+		if err := store.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, check.table, check.column).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("expected %s column on %s after migration, count=%d", check.column, check.table, count)
+		}
 	}
 }
 

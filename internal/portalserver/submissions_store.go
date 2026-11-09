@@ -21,6 +21,7 @@ type SubAssignment struct {
 	MaxTotalBytes     int64    `json:"maxTotalBytes"`
 	LateCapPercent    int      `json:"lateCapPercent"`
 	IsOpen            bool     `json:"isOpen"`
+	Completed         bool     `json:"completed"`
 	CreatedAt         string   `json:"createdAt"`
 }
 
@@ -95,15 +96,16 @@ type dbScanner interface {
 }
 
 const subAssignmentCols = `id, course_year_id, term_id, title, language, instructions, due_at,
-	expected_filenames, max_file_bytes, max_total_bytes, late_cap_percent, is_open, created_at`
+	expected_filenames, max_file_bytes, max_total_bytes, late_cap_percent, is_open, completed, created_at`
 
 func scanSubAssignment(row dbScanner) (*SubAssignment, error) {
 	var a SubAssignment
 	var dueAt sql.NullString
 	var filenames string
 	var isOpen int
+	var completed int
 	err := row.Scan(&a.ID, &a.CourseYearID, &a.TermID, &a.Title, &a.Language, &a.Instructions,
-		&dueAt, &filenames, &a.MaxFileBytes, &a.MaxTotalBytes, &a.LateCapPercent, &isOpen, &a.CreatedAt)
+		&dueAt, &filenames, &a.MaxFileBytes, &a.MaxTotalBytes, &a.LateCapPercent, &isOpen, &completed, &a.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +118,7 @@ func scanSubAssignment(row dbScanner) (*SubAssignment, error) {
 		}
 	}
 	a.IsOpen = isOpen != 0
+	a.Completed = completed != 0
 	return &a, nil
 }
 
@@ -152,6 +155,22 @@ func (s *Store) UpdateSubAssignment(a *SubAssignment) error {
 	}
 	if affected == 0 {
 		return fmt.Errorf("assignment not found: %d", a.ID)
+	}
+	return nil
+}
+
+// SetSubAssignmentCompleted updates an assignment's teacher-only review state.
+func (s *Store) SetSubAssignmentCompleted(id int64, completed bool) error {
+	res, err := s.db.Exec(`UPDATE sub_assignments SET completed = ? WHERE id = ?`, boolInt(completed), id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("assignment not found: %d", id)
 	}
 	return nil
 }

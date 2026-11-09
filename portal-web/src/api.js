@@ -311,6 +311,12 @@ export const adminUpdateSubAssignment = (id, body) =>
     body: JSON.stringify(body),
   });
 
+export const adminSetSubAssignmentCompleted = (id, completed) =>
+  adminFetch(`/admin/submissions/assignments/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ completed }),
+  });
+
 export const adminDeleteSubAssignment = (id) =>
   adminFetch(`/admin/submissions/assignments/${id}`, { method: 'DELETE' });
 

@@ -5,6 +5,7 @@ import {
   adminListSubAssignments,
   adminCreateSubAssignment,
   adminUpdateSubAssignment,
+  adminSetSubAssignmentCompleted,
   adminDeleteSubAssignment,
   adminClearSubAssignmentSubmissions,
   adminSubmissionsDisk,
@@ -71,6 +72,7 @@ export function AdminSubmissions() {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [completingId, setCompletingId] = useState(null);
   const location = useLocation();
   const navigate = useNavigate();
   const [pendingEditId, setPendingEditId] = useState(location.state?.editId || null);
@@ -196,6 +198,22 @@ export function AdminSubmissions() {
         return refresh(selected);
       })
       .catch((err) => setError(err.message));
+  };
+
+  const setCompleted = (assignment, completed) => {
+    setError(null);
+    setNotice(null);
+    setCompletingId(assignment.id);
+    adminSetSubAssignmentCompleted(assignment.id, completed)
+      .then((data) => {
+        const updated = data?.assignment;
+        if (!updated) return;
+        setAssignments((current) =>
+          current.map((item) => (item.id === assignment.id ? { ...item, ...updated } : item))
+        );
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setCompletingId(null));
   };
 
   if (!courses) {
@@ -393,7 +411,12 @@ export function AdminSubmissions() {
           ) : (
             <div className="divide-y divide-gray-100">
               {assignments.map((assignment) => (
-                <div key={assignment.id} className="px-6 py-4 flex items-center justify-between gap-3">
+                <div
+                  key={assignment.id}
+                  className={`px-6 py-4 flex items-center justify-between gap-3 transition-colors ${
+                    assignment.completed ? 'bg-green-50' : ''
+                  }`}
+                >
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-gray-900">{assignment.title}</span>
@@ -428,6 +451,16 @@ export function AdminSubmissions() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
+                    <label className="flex items-center gap-2 mr-2 text-sm font-medium text-gray-700 whitespace-nowrap">
+                      <input
+                        type="checkbox"
+                        checked={assignment.completed === true}
+                        disabled={completingId === assignment.id}
+                        onChange={(e) => setCompleted(assignment, e.target.checked)}
+                        className="rounded border-gray-300 text-green-600 focus:ring-green-500"
+                      />
+                      Completed
+                    </label>
                     <Link
                       to={`/admin/submissions/${assignment.id}`}
                       className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition"
