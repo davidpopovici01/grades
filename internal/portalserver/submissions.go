@@ -463,7 +463,7 @@ func (s *Server) handleAdminSubAssignment(w http.ResponseWriter, r *http.Request
 				size = info.Size()
 			}
 			out = append(out, map[string]any{
-				"id": t.ID, "name": t.Name, "visibility": t.Visibility, "size": size,
+				"id": t.ID, "name": t.Name, "filename": t.StoredName, "visibility": t.Visibility, "size": size,
 			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"assignment": adminAssignmentJSON(a, ""), "tests": out})
@@ -512,7 +512,7 @@ func (s *Server) handleAdminSubAssignment(w http.ResponseWriter, r *http.Request
 }
 
 // handleAdminSubTestUpload adds a harness file to an assignment (multipart:
-// one "file" part plus "name" and "visibility" fields).
+// one "file" part plus "visibility" and an optional display "name").
 func (s *Server) handleAdminSubTestUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -568,9 +568,12 @@ func (s *Server) handleAdminSubTestUpload(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-	if name == "" || len(content) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and file are required"})
+	if len(content) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file is required"})
 		return
+	}
+	if name == "" {
+		name = storedName
 	}
 	if visibility == "" {
 		visibility = "public"
@@ -610,13 +613,13 @@ func (s *Server) handleAdminSubTestUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": id, "name": name, "visibility": visibility, "size": len(content),
+		"id": id, "name": name, "filename": storedName, "visibility": visibility, "size": len(content),
 	})
 }
 
 // handleAdminSubTestDelete removes a harness file and its row (DELETE),
-// serves the harness file for preview/download (GET), or overwrites the
-// harness content (PUT, raw text body).
+// serves it for preview/download (GET), or updates its content and filename
+// (PUT, JSON or raw text body).
 func (s *Server) handleAdminSubTestDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete && r.Method != http.MethodGet && r.Method != http.MethodPut {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -638,8 +641,49 @@ func (s *Server) handleAdminSubTestDelete(w http.ResponseWriter, r *http.Request
 	}
 	path := filepath.Join(testsDir(s.config.SubmissionsDir, a.ID), test.StoredName)
 	if r.Method == http.MethodPut {
-		content, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTestFileBytes+1))
-		if err != nil || int64(len(content)) > maxTestFileBytes {
+		jsonUpdate := strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json")
+		filename := test.StoredName
+		var content []byte
+		if jsonUpdate {
+			var req struct {
+				Content  string `json:"content"`
+				Filename string `json:"filename"`
+			}
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTestFileBytes*6+65536))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "test file too large"})
+				return
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+				return
+			}
+			content = []byte(req.Content)
+			if strings.TrimSpace(req.Filename) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "test filename is required"})
+				return
+			}
+			filename, err = sanitizeFilename(strings.TrimSpace(req.Filename))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			ext := ".java"
+			if a.Language == "python" {
+				ext = ".py"
+			}
+			if !strings.HasSuffix(strings.ToLower(filename), ext) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("test file must end with %s", ext)})
+				return
+			}
+		} else {
+			content, err = io.ReadAll(http.MaxBytesReader(w, r.Body, maxTestFileBytes+1))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "test file too large"})
+				return
+			}
+		}
+		if int64(len(content)) > maxTestFileBytes {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "test file too large"})
 			return
 		}
@@ -647,11 +691,35 @@ func (s *Server) handleAdminSubTestDelete(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "test file must not be empty"})
 			return
 		}
-		if err := os.WriteFile(path, content, 0o644); err != nil {
+
+		renamed := filename != test.StoredName
+		targetPath := filepath.Join(testsDir(s.config.SubmissionsDir, a.ID), filename)
+		if renamed {
+			if _, err := os.Stat(targetPath); err == nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "a test file with that name already exists"})
+				return
+			} else if !os.IsNotExist(err) {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check test filename"})
+				return
+			}
+		}
+		if err := os.WriteFile(targetPath, content, 0o644); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store test file"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "size": len(content)})
+		if jsonUpdate {
+			if err := s.store.UpdateSubTestFilename(testID, filename); err != nil {
+				if renamed {
+					_ = os.Remove(targetPath)
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save test"})
+				return
+			}
+		}
+		if renamed {
+			_ = os.Remove(path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "size": len(content), "name": filename, "filename": filename})
 		return
 	}
 	if r.Method == http.MethodGet {

@@ -320,11 +320,10 @@ export const adminSetSubAssignmentCompleted = (id, completed) =>
 export const adminDeleteSubAssignment = (id) =>
   adminFetch(`/admin/submissions/assignments/${id}`, { method: 'DELETE' });
 
-export const adminUploadSubTest = (assignmentId, file, name, visibility) => {
+export const adminUploadSubTest = (assignmentId, file, visibility) => {
   const token = sessionStorage.getItem('adminToken') || '';
   const form = new FormData();
   form.append('file', file);
-  form.append('name', name);
   form.append('visibility', visibility);
   // No Content-Type header: the browser sets the multipart boundary.
   return fetch(`${API_BASE}/admin/submissions/assignments/${assignmentId}/tests`, {
@@ -362,12 +361,12 @@ export const adminGetSubTestFile = (assignmentId, testId) => {
   });
 };
 
-// adminUpdateSubTest overwrites a test harness file with new content.
-export const adminUpdateSubTest = (assignmentId, testId, content) =>
+// adminUpdateSubTest overwrites a test harness and updates its filename.
+export const adminUpdateSubTest = (assignmentId, testId, content, filename) =>
   adminFetch(`/admin/submissions/assignments/${assignmentId}/tests/${testId}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'text/plain' },
-    body: content,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, filename }),
   });
 
 export const adminGetSampleFiles = (assignmentId) =>

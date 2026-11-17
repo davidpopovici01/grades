@@ -107,6 +107,9 @@ func adminRequest(t *testing.T, handler http.Handler, method, path string, body 
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Authorization", "Bearer test-teacher-token")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
@@ -157,8 +160,10 @@ func uploadTestFile(t *testing.T, handler http.Handler, assignmentID int64, name
 	t.Helper()
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
-	if err := w.WriteField("name", name); err != nil {
-		t.Fatal(err)
+	if name != "" {
+		if err := w.WriteField("name", name); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := w.WriteField("visibility", visibility); err != nil {
 		t.Fatal(err)
@@ -876,6 +881,121 @@ func TestSampleSolutionAndInlineTestEdit(t *testing.T) {
 		fmt.Sprintf("/api/admin/submissions/assignments/%d/sample/run", assignmentID), nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("run after deleting sample files: got %d, want 400", rec.Code)
+	}
+}
+
+func TestAdminTestFilenameDefaultsAndRename(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	server, handler, _ := newSubmissionsTestServer(t)
+	assignmentID := createTestAssignment(t, handler, nil)
+
+	rec := uploadTestFile(t, handler, assignmentID, "", "public", "first.py", "print('PASS: first')\n")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload test without name: %d %s", rec.Code, rec.Body.String())
+	}
+	var upload struct {
+		Name     string `json:"name"`
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil || upload.Name != "first.py" || upload.Filename != "first.py" {
+		t.Fatalf("upload filename defaults: %+v, %v", upload, err)
+	}
+	if rec := uploadTestFile(t, handler, assignmentID, "", "secret", "other.py", "print('PASS: other')\n"); rec.Code != http.StatusOK {
+		t.Fatalf("upload second test: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = adminRequest(t, handler, http.MethodGet,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d", assignmentID), nil)
+	var detail struct {
+		Tests []struct {
+			ID       int64  `json:"id"`
+			Name     string `json:"name"`
+			Filename string `json:"filename"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil || len(detail.Tests) != 2 {
+		t.Fatalf("test detail: %v %s", err, rec.Body.String())
+	}
+	testID := detail.Tests[0].ID
+	if detail.Tests[0].Filename != "first.py" || detail.Tests[0].Name != "first.py" {
+		t.Fatalf("test detail filename: %+v", detail.Tests[0])
+	}
+
+	updated := "print('PASS: renamed')\n"
+	rec = adminRequest(t, handler, http.MethodPut,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/tests/%d", assignmentID, testID),
+		map[string]string{"content": updated, "filename": "renamed.py"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename test: %d %s", rec.Code, rec.Body.String())
+	}
+	oldPath := filepath.Join(testsDir(server.config.SubmissionsDir, assignmentID), "first.py")
+	newPath := filepath.Join(testsDir(server.config.SubmissionsDir, assignmentID), "renamed.py")
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old harness still exists: %v", err)
+	}
+	if data, err := os.ReadFile(newPath); err != nil || string(data) != updated {
+		t.Fatalf("renamed harness: %q, %v", data, err)
+	}
+	stored, err := server.store.GetSubTest(testID)
+	if err != nil || stored.Name != "renamed.py" || stored.StoredName != "renamed.py" {
+		t.Fatalf("stored test after rename: %+v, %v", stored, err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		filename string
+		wantCode int
+	}{
+		{name: "wrong extension", filename: "renamed.txt", wantCode: http.StatusBadRequest},
+		{name: "duplicate filename", filename: "other.py", wantCode: http.StatusConflict},
+		{name: "empty filename", filename: "", wantCode: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := adminRequest(t, handler, http.MethodPut,
+				fmt.Sprintf("/api/admin/submissions/assignments/%d/tests/%d", assignmentID, testID),
+				map[string]string{"content": updated, "filename": tc.filename})
+			if rec.Code != tc.wantCode {
+				t.Fatalf("rename status: got %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+		})
+	}
+	if data, err := os.ReadFile(newPath); err != nil || string(data) != updated {
+		t.Fatalf("harness changed after rejected rename: %q, %v", data, err)
+	}
+
+	rec = adminRawRequest(t, handler, http.MethodPut,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/sample/files/main.py", assignmentID), "print('sample')\n")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload sample file: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = adminRequest(t, handler, http.MethodPost,
+		fmt.Sprintf("/api/admin/submissions/assignments/%d/sample/run", assignmentID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run renamed test on sample: %d %s", rec.Code, rec.Body.String())
+	}
+	var runs struct {
+		Results []struct {
+			TestName string `json:"testName"`
+			Status   string `json:"status"`
+			Passed   int    `json:"passed"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
+		t.Fatal(err)
+	}
+	foundRenamed := false
+	for _, run := range runs.Results {
+		if run.TestName == "renamed.py" {
+			foundRenamed = true
+			if run.Status != "done" || run.Passed != 1 {
+				t.Fatalf("renamed test run: %+v", run)
+			}
+		}
+	}
+	if !foundRenamed {
+		t.Fatalf("renamed test missing from sample run: %+v", runs.Results)
 	}
 }
 
