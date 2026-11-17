@@ -76,8 +76,7 @@ export function AdminAssignmentDetail() {
   const [notice, setNotice] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
 
-  const [testFile, setTestFile] = useState(null);
-  const [testName, setTestName] = useState('');
+  const [testFiles, setTestFiles] = useState([]);
   const [testVisibility, setTestVisibility] = useState('public');
   const [testView, setTestView] = useState({});
   const [testEdit, setTestEdit] = useState({});
@@ -85,6 +84,7 @@ export function AdminAssignmentDetail() {
   const [sampleFiles, setSampleFiles] = useState(null);
   const [sampleEditor, setSampleEditor] = useState(null);
   const [sampleSaving, setSampleSaving] = useState(false);
+  const [sampleUploading, setSampleUploading] = useState(false);
   const [sampleResults, setSampleResults] = useState(null);
   const [sampleRunning, setSampleRunning] = useState(false);
   const [basecodeFiles, setBasecodeFiles] = useState(null);
@@ -95,6 +95,8 @@ export function AdminAssignmentDetail() {
   const [runningStudent, setRunningStudent] = useState(null);
   const [plagStarting, setPlagStarting] = useState(false);
   const [expanded, setExpanded] = useState({});
+  const testFileInputRef = useRef(null);
+  const sampleFileInputRef = useRef(null);
   const queueWasActive = useRef(false);
   const expandedRef = useRef(expanded);
   useEffect(() => {
@@ -256,24 +258,36 @@ export function AdminAssignmentDetail() {
     return () => clearInterval(timer);
   }, [plagRunning, diffRunning, loadPlagiarism, loadDiffPlag]);
 
-  const uploadTest = () => {
-    if (!testFile || !testName.trim()) {
-      setError('Choose a harness file and give the test a name.');
+  const uploadTest = async () => {
+    if (testFiles.length === 0) {
+      setError('Choose at least one harness file.');
       return;
     }
     setUploadingTest(true);
     setError(null);
     setNotice(null);
-    adminUploadSubTest(assignmentId, testFile, testName.trim(), testVisibility)
-      .then(() => {
-        setTestFile(null);
-        setTestName('');
-        setTestVisibility('public');
-        setNotice('Test uploaded.');
-        return loadAssignment();
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setUploadingTest(false));
+    const failures = [];
+    let uploaded = 0;
+    try {
+      for (const file of testFiles) {
+        try {
+          await adminUploadSubTest(assignmentId, file, testVisibility);
+          uploaded += 1;
+        } catch (err) {
+          failures.push(`${file.name}: ${err.message}`);
+        }
+      }
+      setTestFiles([]);
+      if (testFileInputRef.current) testFileInputRef.current.value = '';
+      setTestVisibility('public');
+      await loadAssignment();
+      if (uploaded > 0) setNotice(`Uploaded ${uploaded} test${uploaded === 1 ? '' : 's'}.`);
+      if (failures.length > 0) setError(`Some uploads failed — ${failures.join('; ')}`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setUploadingTest(false);
+    }
   };
 
   const deleteTest = (test) => {
@@ -308,7 +322,10 @@ export function AdminAssignmentDetail() {
   };
 
   const startTestEdit = (test) => {
-    const open = (text) => setTestEdit((prev) => ({ ...prev, [test.id]: text }));
+    const open = (text) => setTestEdit((prev) => ({
+      ...prev,
+      [test.id]: { content: text, filename: test.filename || test.name },
+    }));
     if (typeof testView[test.id] === 'string') {
       open(testView[test.id]);
       return;
@@ -330,19 +347,54 @@ export function AdminAssignmentDetail() {
   };
 
   const saveTestEdit = (test) => {
-    const content = testEdit[test.id];
+    const edit = testEdit[test.id];
+    if (!edit) return;
+    const filename = edit.filename.trim();
+    if (!filename) {
+      setError('Give the test file a name.');
+      return;
+    }
+    const { content } = edit;
     setTestSaving(test.id);
     setError(null);
     setNotice(null);
-    adminUpdateSubTest(assignmentId, test.id, content)
+    adminUpdateSubTest(assignmentId, test.id, content, filename)
       .then(() => {
         setTestView((prev) => ({ ...prev, [test.id]: content }));
         cancelTestEdit(test);
-        setNotice(`Test "${test.name}" saved.`);
+        setNotice(`Test "${filename}" saved.`);
         return loadAssignment();
       })
       .catch((err) => setError(err.message))
       .finally(() => setTestSaving(null));
+  };
+
+  const uploadSampleFiles = async (files) => {
+    if (files.length === 0) return;
+    setSampleUploading(true);
+    setError(null);
+    setNotice(null);
+    const failures = [];
+    let uploaded = 0;
+    try {
+      for (const file of files) {
+        try {
+          const content = await file.text();
+          await adminPutSampleFile(assignmentId, file.name, content);
+          uploaded += 1;
+        } catch (err) {
+          failures.push(`${file.name}: ${err.message}`);
+        }
+      }
+      if (sampleFileInputRef.current) sampleFileInputRef.current.value = '';
+      await loadSample();
+      if (uploaded > 0) setNotice(`Uploaded ${uploaded} sample file${uploaded === 1 ? '' : 's'}.`);
+      if (failures.length > 0) setError(`Some uploads failed — ${failures.join('; ')}`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSampleUploading(false);
+    }
   };
 
   const editSampleFile = (file) => {
@@ -662,16 +714,13 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
             </details>
             <div className="flex flex-wrap items-center gap-2">
               <input
+                ref={testFileInputRef}
                 type="file"
-                onChange={(e) => setTestFile(e.target.files?.[0] || null)}
+                multiple
+                accept={assignment.language === 'java' ? '.java' : '.py'}
+                onChange={(e) => setTestFiles(Array.from(e.target.files || []))}
+                disabled={uploadingTest}
                 className="text-sm text-gray-600"
-              />
-              <input
-                type="text"
-                value={testName}
-                onChange={(e) => setTestName(e.target.value)}
-                placeholder="Test name"
-                className={inputClass}
               />
               <label className="flex items-center gap-1 text-sm text-gray-700">
                 <input
@@ -693,10 +742,10 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
               </label>
               <button
                 onClick={uploadTest}
-                disabled={uploadingTest}
+                disabled={uploadingTest || testFiles.length === 0}
                 className="px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
               >
-                {uploadingTest ? 'Uploading...' : 'Upload Test'}
+                {uploadingTest ? 'Uploading...' : 'Upload Tests'}
               </button>
             </div>
           </div>
@@ -708,7 +757,7 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                 <div key={test.id} className="px-6 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-sm font-medium text-gray-900 break-all">{test.name}</span>
+                      <span className="text-sm font-medium text-gray-900 break-all">{test.filename || test.name}</span>
                       <VisibilityBadge visibility={test.visibility} />
                       <span className="text-xs text-gray-400">{formatSize(test.size)}</span>
                     </div>
@@ -735,10 +784,25 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
                   </div>
                   {testEdit[test.id] !== undefined ? (
                     <div className="mt-2 space-y-2">
+                      <label className="block text-xs font-medium text-gray-600">
+                        Filename
+                        <input
+                          type="text"
+                          value={testEdit[test.id].filename}
+                          onChange={(e) => setTestEdit((prev) => ({
+                            ...prev,
+                            [test.id]: { ...prev[test.id], filename: e.target.value },
+                          }))}
+                          className={`${inputClass} mt-1 w-full font-mono`}
+                        />
+                      </label>
                       <textarea
                         rows={16}
-                        value={testEdit[test.id]}
-                        onChange={(e) => setTestEdit((prev) => ({ ...prev, [test.id]: e.target.value }))}
+                        value={testEdit[test.id].content}
+                        onChange={(e) => setTestEdit((prev) => ({
+                          ...prev,
+                          [test.id]: { ...prev[test.id], content: e.target.value },
+                        }))}
                         className="w-full text-xs bg-white border border-gray-300 rounded-lg p-3 font-mono text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                         spellCheck={false}
                       />
@@ -779,6 +843,17 @@ check("handles negatives", calculator.add(-1, 1) == 0)`}
           <div className="px-6 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
             <h2 className="font-semibold text-gray-800">Sample Solution</h2>
             <div className="flex items-center gap-2">
+              <label className={`px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition cursor-pointer ${sampleUploading ? 'opacity-50' : ''}`}>
+                <input
+                  ref={sampleFileInputRef}
+                  type="file"
+                  multiple
+                  onChange={(e) => uploadSampleFiles(Array.from(e.target.files || []))}
+                  disabled={sampleUploading}
+                  className="hidden"
+                />
+                {sampleUploading ? 'Uploading...' : 'Upload Files'}
+              </label>
               <button
                 onClick={() => setSampleEditor({ name: '', content: '', isNew: true })}
                 className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"

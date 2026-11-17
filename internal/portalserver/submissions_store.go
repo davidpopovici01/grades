@@ -346,6 +346,12 @@ func (s *Store) GetSubTest(id int64) (*SubTest, error) {
 	return &t, nil
 }
 
+// UpdateSubTestFilename changes a test's display and stored filenames.
+func (s *Store) UpdateSubTestFilename(id int64, filename string) error {
+	_, err := s.db.Exec(`UPDATE sub_tests SET name = ?, stored_name = ? WHERE id = ?`, filename, filename, id)
+	return err
+}
+
 // DeleteSubTest removes a test row; the caller removes the stored file.
 func (s *Store) DeleteSubTest(id int64) error {
 	_, err := s.db.Exec(`DELETE FROM sub_tests WHERE id = ?`, id)
